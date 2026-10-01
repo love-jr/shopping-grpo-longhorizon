@@ -14,7 +14,7 @@ Reproducible post-training and evaluation for long-horizon shopping agents
 [![LoRA SFT](https://img.shields.io/badge/Post--training-LoRA%20SFT-7B61FF)](docs/sft.md)
 [![veRL](https://img.shields.io/badge/veRL-0.8.0-0E8A16)](https://github.com/verl-project/verl)
 [![ShopSimulator](https://img.shields.io/badge/Environment-ShopSimulator%20v2.1-4C78A8)](https://arxiv.org/pdf/2601.18225)
-[![Benchmark](https://img.shields.io/badge/Benchmark-Final--200--Clean-F59E0B)](docs/evaluation-dataset.md)
+[![Benchmark](https://img.shields.io/badge/Benchmark-Final--200--Clean-F59E0B)](docs/evaluation.md#固定-benchmark)
 
 <br />
 
@@ -49,11 +49,11 @@ does not depend on a separately running third-party repository.
 |---|---|---|---|
 | Baseline | Evaluate the untouched base model | `bash scripts/baseline.sh` | [Evaluation](docs/evaluation.md) |
 | SFT | Learn tool use from accepted teacher trajectories | `bash scripts/sft.sh` | [SFT](docs/sft.md) |
-| GRPO | Optimize terminal Reward v3 with online rollouts | `bash scripts/grpo.sh` | [GRPO](docs/grpo.md) |
+| GRPO | Optimize terminal Reward v3 with online rollouts | `bash scripts/grpo.sh` | [Training](docs/sft.md#grpo) |
 | Evaluation | Run the curated Final-200 Clean protocol | `bash scripts/evaluate.sh NAME` | [Evaluation](docs/evaluation.md) |
 
 The checked-in SFT data was produced by a separate collection stage documented
-in [Data collection](docs/data-collection.md). The custom constraint-aware
+in [Data collection and training](docs/sft.md). The custom constraint-aware
 reward is specified in [Reward v3](docs/reward-v3.md).
 
 ```mermaid
@@ -76,7 +76,7 @@ Environment v2.1. It produced 2,498 raw trajectories, of which 1,026 passed the
 strict acceptance filter. This frozen revision uses 1,000 trajectories split
 into 800 training and 200 validation rows. SFT, GRPO and Final-200 Clean task IDs are
 pairwise disjoint. Dataset hashes and the audit are in
-[Data collection](docs/data-collection.md).
+[Data collection and training](docs/sft.md).
 
 The resumable collection entry point is:
 
@@ -97,22 +97,17 @@ LLM-as-a-Judge reward model is used for training.
 
 The repository pins `verl==0.8.0` instead of copying its source. It keeps only
 the project-specific AgentLoop, tool adapter, runtime compatibility code and a
-small SHA-256-checked patch. See the [GRPO guide](docs/grpo.md) for details.
+small SHA-256-checked patch. See the [training guide](docs/sft.md) for details.
 
 ### How evaluation works
 
-Formal evaluation combines deterministic checks with two LLM-as-Judge roles.
-DeepSeek V4 Flash curates a frozen requirement Rubric from code-generated
-category, brand, model, function, option and price candidates. It may select and
-deduplicate candidates, but cannot invent fields or expected values. The same
-Rubric is shared by Baseline, SFT and GRPO.
+Formal evaluation combines deterministic checks and a Flash Rubric Curator and
+trajectory Judge. The Curator selects directly supported requirements from
+code-generated candidates; the same frozen Rubric is shared by Baseline, SFT
+and GRPO.
 
-After each Actor completes a rollout, code normalizes events and computes
-Reward, legality, repetition, context and infrastructure checks. Valid
-trajectories then go to DeepSeek V4 Pro with the original Query, frozen Rubric,
-Actor-visible trajectory, neutral terminal flags and allowlisted behavioral
-metrics. Reward values, hidden Gold fields, raw observations, success labels and
-other models' results are excluded.
+The trajectory Judge sees the Query, frozen Rubric and Actor-visible evidence,
+but not Reward values, hidden Gold fields or raw observations.
 
 ```mermaid
 flowchart TD
@@ -123,22 +118,20 @@ flowchart TD
     E --> F[Normalization and hard checks]
     F -->|valid| G[Judge-safe payload]
     D --> G
-    G --> H[V4 Pro requirement and five-dimension judgment]
+    G --> H[V4 Flash requirement and five-dimension judgment]
     F -->|infrastructure invalid| I[not_judged]
     H --> J[Four-panel aggregation]
     I --> J
     J --> K[Paired Baseline / SFT / GRPO comparison]
 ```
 
-V4 Pro scores Search Strategy, Candidate Utilization, Evidence Verification,
+Flash scores Search Strategy, Candidate Utilization, Evidence Verification,
 Decision Quality and Termination Efficiency independently on a 0/1/2 scale. It
-also assesses each Rubric and assigns errors from a frozen taxonomy. The final
-report keeps Reward/terminal, requirement Rubric, trajectory quality and
-deterministic behavior as four separate panels—there is no composite score.
-Failed, missing and not-judged tasks remain in the Final-200 Clean denominator. The
-[evaluation guide](docs/evaluation.md) contains the complete prompts, one
-worked benchmark example, input-isolation rules and aggregation contract. An
-historical static view is available in the [Final-200 Benchmark Dashboard](docs/evaluation-dashboard.html); the current task set is documented in [Final-200 Clean](docs/evaluation-dataset.md).
+also assesses each Rubric and assigns errors from a frozen taxonomy. Reports
+keep Reward/terminal, requirement Rubric, trajectory quality and deterministic
+behavior separate, with a fixed 200-task denominator.
+The [evaluation guide](docs/evaluation.md) documents the pipeline, artifacts
+and fixed Final-200 Clean task set.
 
 > **Reserved figure — Training and evaluation pipeline.** A full-width diagram
 > showing teacher data collection, LoRA SFT, online GRPO rollouts and the shared
@@ -146,45 +139,49 @@ historical static view is available in the [Final-200 Benchmark Dashboard](docs/
 
 ## Results
 
-A contributor reproduction is now available on the current Final-200 Clean
-benchmark. See the [evaluation update log](docs/evaluation-updates.md) for the
-full protocol, failure distribution and artifact hashes:
+This repository reproduced the full pipeline on Final-200 Clean
+(SHA-256 `d99112a2…`) using two NVIDIA A40 46 GB GPUs:
 
-| Model | Strict success | Purchase success | Done rate | Mean reward |
-|---|---:|---:|---:|---:|
-| Qwen3.8-27B (BF16 weights, thinking disabled) | 73.0% | 73.0% | 99.5% | 0.6354 |
+| Model | Strict success | Purchase success | Done rate | Mean reward | Mean steps |
+|---|---:|---:|---:|---:|---:|
+| Qwen3.5-2B baseline | 0.50% | 0.50% | 24.0% | -0.1362 | 6.43 |
+| LoRA SFT | 62.50% | 62.50% | 99.5% | 0.4979 | 8.86 |
+| GRPO step 100 | 63.50% | 63.50% | 100% | 0.5117 | 8.75 |
+| GRPO step 500 | 62.50% | 62.50% | 100% | 0.4981 | 8.90 |
 
-The following are archived Final-200 results; new comparisons use Final-200 Clean:
-
-| Model | Strict success | Purchase success | Mean reward |
-|---|---:|---:|---:|
-| Qwen3.5-2B baseline | 0.0% | 0.0% | -0.1105 |
-| LoRA SFT | 60.5% | 60.5% | 0.4729 |
-| GRPO step 100 | 62.0% | 62.5% | 0.5158 |
-
-The complete compact summaries and reproduction settings are in
-[`experiments/`](experiments/). These are reported results, not a promise that
-different hardware or dependency versions will produce bit-identical training.
+These are Final-200 Clean rollout results, not scores from the new Flash Judge.
+Their summaries are local `outputs/evaluation/{baseline,sft,grpo-step100,grpo-step500}/summary.json` artifacts.
+`experiments/` contains older Benchmark results and does not substantiate this table.
 
 ## Training hardware and time
 
-All training used a single NVIDIA RTX 6000 with 96 GB of GPU memory.
+### LoRA SFT training (2× NVIDIA A40 46 GB, 799 train / 200 validation, 3 epochs)
 
-### LoRA SFT training (448 training examples, 3 epochs)
+| Item | Value |
+|---|---:|
+| Launch | `torchrun --standalone --nproc_per_node=2` |
+| Effective batch | 1 × 2 GPUs × 8 accumulation = 16 |
+| Total steps | 150 (50 steps/epoch) |
+| Time per step | 98.8 s |
+| Training only / including validation | 4 h 07 min / 4 h 11 min |
+| Peak GPU memory | 16.7 GiB |
+| train_loss / final eval_loss | 0.3365 / 0.3356 |
+| GPU utilization | 59–63% |
 
-| Stage | Time | Peak GPU memory |
-|---|---:|---:|
-| One epoch (56 steps) | ~62 min | 89 GiB |
-| Full 3-epoch training | ~3 h | 89 GiB |
+18 of the 24 layers are Gated DeltaNet. Fast-kernel dependencies were incomplete
+in that run, so it fell back to PyTorch and the GPU was not saturated; with
+`flash-linear-attention` installed, the same implementation measured 14.05 s →
+2.03 s per step (T=8188, single GPU, forward and backward).
 
-### GRPO training (veRL 0.8, 8 environment workers)
+### GRPO training (veRL 0.8, 8 environment workers, 2× NVIDIA A40 46 GB)
 
-| Step range | Per-step time | Cumulative time |
-|---|---:|---:|
-| steps 0–24 | ~140 s/step, including Ray startup | ~56 min |
-| stable steps 20–30 | ~73–120 s/step | ~2 min/step in the steady state |
-| 100 steps (reported checkpoint) | ~110 s/step on average | ~3–4 h |
-| Full 500 steps | ~100 s/step | ~14 h |
+| Item | Value |
+|---|---:|
+| Parallelism | FSDP + DP=2 (one full replica and one vLLM instance per GPU) |
+| Time per step | 35–53 s (about 50 s averaged over 500 steps) |
+| Full 500 steps | about 10.5 h |
+| Training steps / generation batches | 500 / 1989 (281 batches dropped by dynamic sampling) |
+| Actor peak GPU memory | 15.7 GiB reserved |
 
 ### Other stages
 
@@ -199,9 +196,16 @@ All training used a single NVIDIA RTX 6000 with 96 GB of GPU memory.
 
 - Linux with an NVIDIA GPU and a compatible CUDA driver;
 - [`uv`](https://docs.astral.sh/uv/);
-- about 25 GB of free disk for environments, weights and generated artifacts;
+- about 150 GB of free disk for environments, weights and generated artifacts
+  (GRPO writes an ~11 GB checkpoint every 50 steps, ~105 GB for 500 steps);
 - approximately 48 GB GPU memory for the provided SFT recipe;
-- one 96 GB GPU for the provided GRPO recipe.
+- `--liger-kernel` for SFT at 24,576 sequence length (16.7 GiB peak memory);
+- two NVIDIA A40 46 GB GPUs for the provided GRPO recipe, measured here
+  (`configs/grpo.yaml` is configured accordingly), with 15.7 GiB peak actor memory;
+- `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1` for multi-GPU GRPO; without it
+  every rank ends up on GPU0 and NCCL reports `Duplicate GPU detected`;
+- `data.dataloader_num_workers=0` when the container `/dev/shm` is below about
+  10 GB, otherwise DataLoader workers are OOM-killed.
 
 The main environment uses Python 3.12. ShopSimulator is isolated on Python 3.10.
 `uv` creates both environments. veRL is **installed as the pinned
@@ -243,8 +247,13 @@ bash scripts/serve_model.sh Qwen/Qwen3.5-2B
 Evaluate it in a third terminal:
 
 ```bash
+export OPENAI_BASE_URL=https://your-provider.example/v1
+export OPENAI_API_KEY=your-key
 bash scripts/baseline.sh
 ```
+
+`OPENAI_BASE_URL / OPENAI_API_KEY` configure the Flash Curator/Judge;
+`LLM_BASE_URL / LLM_API_KEY` configure only the Actor (local vLLM by default).
 
 Stop the model server before training so it releases the GPU.
 
@@ -370,14 +379,9 @@ bash scripts/grpo.sh --logger swanlab
 
 ## Documentation
 
-- [Data collection and dataset provenance](docs/data-collection.md)
-- [LoRA SFT](docs/sft.md)
-- [GRPO with veRL](docs/grpo.md)
-- [Held-out evaluation](docs/evaluation.md)
-- [Final-200 Clean evaluation dataset](docs/evaluation-dataset.md)
-- [Final-200 Benchmark Dashboard (historical)](docs/evaluation-dashboard.html)
-- [Reward v3 design](docs/reward-v3.md)
-- [Auditable experiment results](experiments/comparison.md)
+- [Data collection, SFT and GRPO](docs/sft.md)
+- [Final-200 Clean evaluation](docs/evaluation.md)
+- [Reward v3](docs/reward-v3.md)
 
 ## Future improvement plan
 

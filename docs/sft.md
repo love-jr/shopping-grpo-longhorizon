@@ -1,88 +1,62 @@
-# LoRA SFT
+# 数据采集、SFT 与 GRPO
 
-## Purpose
+正式路径：Baseline → SFT → GRPO → Evaluation。安装和服务启动见
+[README](../README.md#快速开始)；只维护这一条默认训练路径。
 
-The base model can speak naturally but does not reliably follow
-ShopSimulator's action protocol. Supervised fine-tuning teaches the basic
-policy: issue legal tool calls, use observations as evidence, select product
-variants and terminate.
+## 数据采集
 
-## Inputs
-
-- Base model: `Qwen/Qwen3.5-2B`
-- Main data: `data/sft_pure_v4/all.jsonl` (1,192 rows)
-- Fixed curriculum manifest: `data/sft_curriculum/manifest.json`
-- Gradient rows: 1,073; development rows: 119; Final evaluation overlap: 0
-- Target: assistant tokens only; user and tool-observation tokens are masked
-
-The source and label hashes, exact task IDs, stage definitions, and review-only
-flags are frozen in the curriculum manifest. The older `data/sft/` split is
-kept only for reproducing the historical baseline.
-
-## Run
-
-After `bash scripts/setup.sh`:
+现有教师为 `deepseek-v4-flash`：2,498 条原始轨迹中，1,026 条通过完整
+`gold_purchase` 且 `reward_valid=true` 的筛选；冻结使用 800 train / 200 validation。
+数据来源、哈希和审计见 [`data/sft/metadata.json`](../data/sft/metadata.json)。
+训练、验证与 [`data/evaluation/tasks.jsonl`](../data/evaluation/tasks.jsonl) 必须 task-disjoint。
 
 ```bash
-# Check all six train/merge commands without loading a model.
-bash scripts/sft_curriculum.sh --dry-run
-
-# Run A -> B -> C on the server.
-bash scripts/sft_curriculum.sh --swanlab
+export OPENAI_BASE_URL=https://your-provider.example/v1
+export OPENAI_API_KEY=your-key
+.venv/bin/python scripts/collect_sft_data.py \
+  --tasks data/grpo/train.jsonl --output-dir outputs/sft-collection \
+  --model deepseek-v4-flash --target-accepted 1000 --workers 4
 ```
 
-The launcher trains a LoRA adapter and then merges it with the base model:
+重复运行会从 `raw.jsonl` 续跑；只重建派生数据时加 `--build-only`。
+审核 `reject_stats.json`、数据划分和 metadata 后再更新 `data/sft/`；原始轨迹不提交。
 
-```text
-outputs/models/sft-curriculum/stage-a/{adapter,merged}/
-outputs/models/sft-curriculum/stage-b/{adapter,merged}/
-outputs/models/sft-curriculum/stage-c/{adapter,merged}/
-```
-
-Default recipe:
-
-| Setting | Value |
-|---|---|
-| Maximum sequence length | 24,576 |
-| Epochs | 1 per stage |
-| Per-device batch size | 1 |
-| Gradient accumulation | 8 |
-| Learning rate | `1e-4` -> `7e-5` -> `5e-5` |
-| LoRA rank / alpha / dropout | 16 / 32 / 0.05 |
-| Gradient checkpointing | enabled |
-| Attention implementation | SDPA |
-| Saved epoch checkpoints | 3 |
-
-The long context is intentional: a training example includes the complete
-multi-turn interaction. Shortening it may truncate the terminal decision or the
-evidence that supports it.
-
-Stage A learns the action protocol from 256 foundation rows. Stage B restarts a
-fresh LoRA on A's merged checkpoint and uses 799 cumulative constraint rows.
-Stage C does the same from B and uses all 1,073 training rows. Therefore simple
-skills receive three passes, constraint handling two, and long-horizon strategy
-one. Use `--start-stage b` after A is complete, or `--stop-after-stage b` for a
-bounded server run. A checkpoint interrupted inside a stage can be resumed
-with `--start-stage <stage> --resume-from-checkpoint <checkpoint-dir>`.
-
-## Evaluate
+## SFT
 
 ```bash
-bash scripts/serve_model.sh outputs/models/sft-curriculum/stage-c/merged
-bash scripts/evaluate.sh sft
+bash scripts/sft.sh
 ```
 
-Validation loss is a training-health signal, not the final model score. Select
-among stages using the 119-row development split and failure-type coverage.
-Run Final-200 Clean only after the recipe is frozen, so the final benchmark is
-not silently used for checkpoint selection.
+- 基础模型：`Qwen/Qwen3.5-2B`；输入：`data/sft/{train,validation}.jsonl`。
+- 仅 assistant 动作 token 计算 loss，user 和 tool token 被 mask。
+- 默认 3 epoch、24,576 context、batch 1、gradient accumulation 8、学习率 `1e-4`。
+- LoRA rank/alpha 为 16/32；启用 gradient checkpointing、SDPA 与 Liger。
+- 输出：`outputs/models/sft-lora` 和合并后的 `outputs/models/sft-merged`。
 
-## Output contract
+参数以 [`scripts/train_lora_sft.py`](../scripts/train_lora_sft.py) 为准。
+训练前停止 Actor 模型服务，避免显存竞争。
 
-GRPO starts from the merged model, not directly from the adapter:
+## GRPO
 
-```text
-GRPO_MODEL_PATH=outputs/models/sft-curriculum/stage-c/merged
+输入为 `outputs/models/sft-merged`，训练/验证集为
+`data/grpo/{train,validation}.parquet`（1,000 / 50 tasks）。
+使用固定 `verl==0.8.0`、项目 AgentLoop/工具适配层及 setup 中的 SHA-256 校验补丁；
+不复制 veRL 源码。Reward 直接来自环境，不使用 LLM Judge 训练奖励。
+
+```bash
+bash scripts/grpo.sh --dry-run
+bash scripts/grpo.sh
+# 按验证集选择 checkpoint，再导出
+bash scripts/export_grpo.sh \
+  outputs/models/grpo/global_step_100/actor outputs/models/grpo-merged
 ```
 
-This boundary keeps the GRPO launcher independent of the SFT trainer process.
+配置以 [`configs/grpo.yaml`](../configs/grpo.yaml) 为准：每题 4 条 rollout，
+学习率 `1e-6`，最多 500 optimizer steps；每 50 步保存和验证。
+动态采样最多重采 3 批，最多连续跳过 10 次无信号更新。
+
+双卡配置需要 remove-padding、Triton fused kernels 和
+`RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1`；小 `/dev/shm` 容器使用
+`data.dataloader_num_workers=0`。诊断写入运行目录的 `training_diagnostics.jsonl`。
+
+导出后按[评估指南](evaluation.md)评估；checkpoint 选择只使用验证集，不使用 Final-200 Clean。

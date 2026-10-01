@@ -1,97 +1,27 @@
 # Reward v3
 
-Reward v3 is a deterministic terminal reward for constraint-aware shopping. It
-scores what the agent actually selected using environment evidence; it does not
-ask another language model to judge the answer.
+环境直接计算终局 Reward，不使用 LLM Judge。任务特征在 rollout 前冻结。
+类别与 variant 预算为 hard gate；未通过得 `-0.85`，无法核验得 `0` 且 `reward_valid=false`。
 
-## 1. Compile task requirements
+品牌、型号、核心功能、规格权重为 `0.35 / 0.25 / 0.25 / 0.15`，仅在活跃维度归一化：
+`S = Σ(weight × score) / Σ(active weight)`。完全满足要求 match 和 evidence coverage 都为 1。
 
-Before rollout, the task and target-product metadata are converted into fixed
-features:
-
-- category and upper price bound;
-- explicitly mentioned brand aliases;
-- model identifiers shared by the instruction and target metadata;
-- required core functions;
-- required option values such as color, size, capacity or bundle.
-
-This compilation is frozen before the policy acts. The policy cannot change the
-requirements it will later be scored against.
-
-## 2. Apply hard gates
-
-A purchase must pass both:
-
-- **Category:** the selected product belongs to the required category.
-- **Budget:** the resolved price of the selected variant is at or below the
-  user's upper bound.
-
-A failed hard gate produces `wrong_purchase` with reward `-0.85`. If a hard
-gate cannot be verified from environment evidence, the result is
-`reward_unverifiable`, reward `0.0`, and `reward_valid=false`. This zero is not
-treated as a successful neutral outcome.
-
-## 3. Score preferences
-
-Four soft dimensions are scored among only the dimensions active for that task:
-
-| Dimension | Weight |
+| 终局 | Reward |
 |---|---:|
-| Brand | 0.35 |
-| Model | 0.25 |
-| Core functions | 0.25 |
-| Key options | 0.15 |
+| 完全满足的目标 ASIN：`gold_purchase` | 1.00 |
+| 完全满足的替代商品 | 0.55 |
+| 部分满足的替代商品 | `min(0.25, -0.30 + 0.55 × S)` |
+| 充分搜索后合理放弃 / 过早放弃 | -0.15 / -0.35 |
+| 最大 35 步 / 重复无进展 | -0.50 / -0.65 |
+| 类别错误或超预算 | -0.85 |
+| 证据不可核验 | 0，invalid |
 
-For active dimensions, the match score is:
+合理放弃要求至少两个有效结果集、两个候选，且没有已知可接受候选；可接受候选要求
+hard gate 通过、match ≥ 0.70、coverage ≥ 0.75。
+环境在连续两次完全重复、连续四次无新证据或 35 步时终止。
+严格成功还要求完整 `gold_purchase` 终局和 `reward_valid=true`，不能仅看 reward 数值。
 
-```text
-S = Σ(weight_i × score_i) / Σ(active weight_i)
-```
-
-Evidence coverage is aggregated with the same active weights. Full satisfaction
-requires both match score and coverage to equal 1.0.
-
-## 4. Map the terminal state to reward
-
-| Outcome | Reward |
-|---|---:|
-| Exact target ASIN, all requirements satisfied | `1.00` |
-| Different ASIN, all requirements satisfied | `0.55` |
-| Partial alternative | `min(0.25, -0.30 + 0.55 × S)` |
-| Graceful stop after sufficient search | `-0.15` |
-| Stop before sufficient search | `-0.35` |
-| Maximum 35 steps | `-0.50` |
-| Repeated/no-progress loop | `-0.65` |
-| Wrong category or over budget | `-0.85` |
-| Required evidence unavailable | `0.00`, invalid |
-
-The exact target is called `gold_purchase`; a different item that passes the
-same hard gates and fully satisfies every active preference is
-`valid_alternative_purchase`. This prevents the reward from treating a single
-catalog identifier as the only correct solution.
-
-## 5. Responsible abstention and termination
-
-Stopping is considered graceful only after the agent has inspected at least two
-effective result sets, opened at least two candidates and found no known
-acceptable candidate. A candidate is “known acceptable” when both hard gates
-pass, preference match is at least 0.70 and evidence coverage is at least 0.75.
-
-The environment also ends a rollout after:
-
-- two consecutive exact repeats;
-- four consecutive actions with no new runtime evidence;
-- 35 total steps.
-
-Search results, newly opened products, detail subpages, selected options and
-constraint checks count as evidence. Evidence credits are bounded so an agent
-cannot farm progress indefinitely.
-
-## Source of truth
-
-The constants are frozen in
-[`environments/ShopSimulator/shop_env/configs/environment.json`](../environments/ShopSimulator/shop_env/configs/environment.json).
-The implementation is
-[`reward.py`](../environments/ShopSimulator/shop_env/web_agent_site/engine/reward.py),
-with termination logic in
-[`termination.py`](../environments/ShopSimulator/shop_env/web_agent_site/engine/termination.py).
+实现与常量是唯一真源：
+[`environment.json`](../environments/ShopSimulator/shop_env/configs/environment.json)、
+[`reward.py`](../environments/ShopSimulator/shop_env/web_agent_site/engine/reward.py)、
+[`termination.py`](../environments/ShopSimulator/shop_env/web_agent_site/engine/termination.py)。

@@ -14,7 +14,7 @@
 [![LoRA SFT](https://img.shields.io/badge/Post--training-LoRA%20SFT-7B61FF)](docs/sft.md)
 [![veRL](https://img.shields.io/badge/veRL-0.8.0-0E8A16)](https://github.com/verl-project/verl)
 [![ShopSimulator](https://img.shields.io/badge/Environment-ShopSimulator%20v2.1-4C78A8)](https://arxiv.org/pdf/2601.18225)
-[![Benchmark](https://img.shields.io/badge/Benchmark-Final--200--Clean-F59E0B)](docs/evaluation-dataset.md)
+[![Benchmark](https://img.shields.io/badge/Benchmark-Final--200--Clean-F59E0B)](docs/evaluation.md#固定-benchmark)
 
 <br />
 
@@ -66,7 +66,7 @@ flowchart LR
 |---|---|---|---|
 | Baseline | 测量原始 Qwen3.5-2B 的工具使用能力 | `bash scripts/baseline.sh` | [评估](docs/evaluation.md) |
 | SFT | 从高质量教师轨迹学习合法、完整的购物行为 | `bash scripts/sft.sh` | [SFT](docs/sft.md) |
-| GRPO | 在真实环境 Rollout 中优化 Reward v3 | `bash scripts/grpo.sh` | [GRPO](docs/grpo.md) |
+| GRPO | 在真实环境 Rollout 中优化 Reward v3 | `bash scripts/grpo.sh` | [训练](docs/sft.md#grpo) |
 | Evaluation | 使用同一批 Final-200 Clean 留出任务公平比较模型 | `bash scripts/evaluate.sh NAME` | [评估](docs/evaluation.md) |
 
 ### SFT 数据是怎么收集的？
@@ -92,7 +92,7 @@ python scripts/collect_sft_data.py \
 
 SFT 只在 Assistant 动作 token 上计算 Loss，用户指令和环境 Observation 会被
 Mask。这样模型学习的是可执行的工具策略，而不是背诵环境返回内容。数据哈希、接受率
-和采集审计见[数据采集文档](docs/data-collection.md)。
+和采集审计见[采集与训练指南](docs/sft.md)。
 
 ### GRPO 是怎么训练的？
 
@@ -102,21 +102,13 @@ GRPO 从合并后的 SFT 模型开始。veRL 在 ShopSimulator 中为每个 Prom
 
 本仓库没有复制 veRL 源码，而是固定安装 `verl==0.8.0`，并保留项目自己的
 AgentLoop、工具适配层、运行时兼容代码和一个带 SHA-256 校验的小补丁。详细配置见
-[GRPO 文档](docs/grpo.md)。
+[采集与训练指南](docs/sft.md)。
 
 ### 评估流水线是怎么设计的？
 
-正式评估由“代码硬检查 + 两个 LLM-as-Judge + 固定分母聚合”组成。两个 Judge
-职责不同：
-
-- **DeepSeek V4 Flash 是 Rubric Curator。** 代码先根据每道题的 Query 和私有
-  TaskFacts 提取品类、品牌、型号、功能、规格和价格候选；Flash 只能从候选中选择
-  用户真正要求的约束、去重并标注 hard/soft，不能创造新的字段或期望值。生成的
-  Rubric 冻结一次，由 Baseline、SFT 和 GRPO 共用。
-- **DeepSeek V4 Pro 是 Trajectory Judge。** 它读取用户 Query、冻结 Rubric、
-  Actor 实际看到的完整轨迹、中性终局状态和白名单代码指标，逐条判断需求是否满足，
-  并从搜索策略、候选利用、证据核验、决策质量、终止效率五个维度分别打 0/1/2 分。
-
+**DeepSeek V4 Flash 同时负责 Rubric 整理和轨迹评分。** Rubric 从代码生成的候选中选出
+Query 明确表达的约束，轨迹评分只看到用户需求、冻结 Rubric 和 Actor 可见轨迹；不提供
+Reward 分数、Gold 私有字段或 raw observation。Judge 结果按 schema 和真实 event_id 校验。
 这里的 Rubric 是逐任务评分标准，不是向量检索式 RAG。
 
 ```mermaid
@@ -129,7 +121,7 @@ flowchart TD
     F -->|基础设施无效| G["not_judged，仍计入 Final-200 Clean 分母"]
     F -->|检查通过| H["移除 Reward、Gold、raw observation"]
     D --> H
-    H --> I["V4 Pro 逐需求判断 + 五维评分 + 错误分类"]
+    H --> I["V4 Flash 逐需求判断 + 五维轨迹评分 + 错误分类"]
     G --> J["四面板结果拼装"]
     I --> J
     J --> K["Reward / Rubric / Trajectory / Deterministic"]
@@ -138,66 +130,67 @@ flowchart TD
 
 以 Final-200 中的 `task_id=8187` 为例，Query 要求“一对卡通-永结同心款的高档
 酒红色木梳、礼盒、陪嫁、20 元左右”。代码生成 7 条候选，V4 Flash 冻结为 5 条
-Rubric；SFT Actor 用 10 步完成搜索、详情核验、规格选择和购买；V4 Pro 最终给出
-`搜索策略 2 / 候选利用 1 / 证据核验 1 / 决策质量 2 / 终止效率 2`，并为每项判断
-引用真实的 `event_id`。
+Rubric；SFT Actor 用 10 步完成搜索、详情核验、规格选择和购买。Flash 对轨迹评分，
+并为每项结论引用真实的 `event_id`。
 
-Pro 看不到 Reward 分数、Gold 商品私有字段、raw Observation、成功标签或其他模型
+Flash 看不到 Reward 分数、Gold 商品私有字段、raw Observation、成功标签或其他模型
 结果，因此不能根据答案倒推轨迹质量。最终结果分为四个独立面板：
 
 1. Environment Reward 与终局；
 2. Query Rubric 的 hard/soft 满足情况和 Reward disagreement；
-3. Pro Judge 五维分布与错误类型；
+3. Flash Judge 五维分布与错误类型；
 4. 步数、工具、Guard、重复、上下文和基础设施指标。
 
 四部分不会合成一个总分。缺失、报错和 `not_judged` 任务仍保留在 Final-200 Clean 分母中。
-完整数据流、两个模型的完整 Prompt、输入隔离规则、示例 Rubric 和最终统计口径见
-[评估流水线文档](docs/evaluation.md)。当前集的筛选依据见
-[Final-200 Clean 说明](docs/evaluation-dataset.md)；[Final-200 Dashboard（历史）](docs/evaluation-dashboard.html)
-只保留为历史归档。
+Prompt、输入隔离、产物与 Final-200 Clean 筛选口径见
+[评估指南](docs/evaluation.md)。
 
 
 
 ## 实验结果
 
-当前 Final-200 Clean 上新增了一次贡献者复现实验；完整协议、失败分布和产物哈希见
-[评测更新记录](docs/evaluation-updates.md)：
+本仓库在 Final-200 Clean（SHA-256 `d99112a2…`）上复现了完整流程，双卡 NVIDIA
+A40 46 GB：
 
-| 模型 | 严格成功率 | 购买成功率 | 完成终局率 | 平均 Reward |
-|---|---:|---:|---:|---:|
-| Qwen3.8-27B（BF16 权重，关闭思考） | 73.0% | 73.0% | 99.5% | 0.6354 |
+| 模型 | 严格成功率 | 购买成功率 | 完成终局率 | 平均 Reward | 平均步数 |
+|---|---:|---:|---:|---:|---:|
+| Qwen3.5-2B Baseline | 0.50% | 0.50% | 24.0% | -0.1362 | 6.43 |
+| LoRA SFT | 62.50% | 62.50% | 99.5% | 0.4979 | 8.86 |
+| GRPO step 100 | 63.50% | 63.50% | 100% | 0.5117 | 8.75 |
+| GRPO step 500 | 62.50% | 62.50% | 100% | 0.4981 | 8.90 |
 
-以下是历史 Final-200 的归档结果；当前横向比较统一使用 Final-200 Clean：
-
-| 模型 | 严格成功率 | 购买成功率 | 平均 Reward |
-|---|---:|---:|---:|
-| Qwen3.5-2B Baseline | 0.0% | 0.0% | -0.1105 |
-| LoRA SFT | 60.5% | 60.5% | 0.4729 |
-| GRPO step 100 | 62.0% | 62.5% | 0.5158 |
-
-SFT 带来了主要能力提升，让模型学会合法工具调用、长程搜索和正确终止；GRPO 在此
-基础上进一步减少错误购买、循环和非法动作。机器可读的训练配置、结果摘要和限制说明
-位于 [`experiments/`](experiments/)。
+SFT 带来了主要能力提升。上表为 Final-200 Clean rollout 结果，不是新 Flash Judge 的评分；
+对应摘要位于本地 `outputs/evaluation/{baseline,sft,grpo-step100,grpo-step500}/summary.json`。
+`experiments/` 保留旧 Benchmark 结果，不能作为上表证据或直接比较。
 
 ## 训练硬件与耗时
 
-所有训练均使用单张 NVIDIA RTX 6000（96 GB）完成。
+### SFT LoRA 训练（2× NVIDIA A40 46 GB，799 条训练 / 200 条验证，3 个 epoch）
 
-### SFT LoRA 训练（448 条训练数据，3 个 epoch）
+| 项 | 值 |
+|---|---:|
+| 启动方式 | `torchrun --standalone --nproc_per_node=2` |
+| 有效 batch | 1 × 2 卡 × 8 累积 = 16 |
+| 总步数 | 150（50 步/epoch） |
+| 单步耗时 | 98.8 秒 |
+| 训练本体 / 含验证总时长 | 4 小时 07 分 / 4 小时 11 分 |
+| 峰值显存 | 16.7 GiB |
+| train_loss / 最终 eval_loss | 0.3365 / 0.3356 |
+| GPU 利用率 | 59–63% |
 
-| 阶段 | 耗时 | 峰值显存 |
-|---|---:|---:|
-| 单个 epoch（56 步） | ~62 分钟 | 89 GiB |
-| 完整 3 个 epoch | ~3 小时 | 89 GiB |
+24 层中 18 层为 Gated DeltaNet，本次运行快速内核依赖未装齐，走 PyTorch fallback，
+GPU 未满载。装齐 `flash-linear-attention` 后同一实现实测单步 14.05 s → 2.03 s
+（T=8188，单卡，前反向）。
 
-### GRPO 训练（veRL 0.8，8 个环境 worker）
+### GRPO 训练（veRL 0.8，8 个环境 worker，2× NVIDIA A40 46 GB）
 
-| 步数范围 | 单步耗时 | 累计耗时 |
-|---|---:|---:|
-| step 0–24 | ~140 秒/步（含 Ray 启动开销） | ~56 分钟 |
-| step 20–30 稳定后 | ~73–120 秒/步 | ~2 分钟/步稳定态 |
-| 100 步（报告 checkpoint） | ~110 秒/步均值 | ~3–4 小时 |
-| 完整 500 步 | ~100 秒/步 | ~14 小时 |
+| 项 | 值 |
+|---|---:|
+| 并行方式 | FSDP + DP=2（每卡一个完整副本与一个 vLLM 实例） |
+| 单步耗时 | 35–53 秒（500 步均值约 50 秒） |
+| 完整 500 步 | 约 10.5 小时 |
+| 训练步 / 生成批次 | 500 / 1989（281 批被动态采样丢弃） |
+| actor 峰值显存 | 15.7 GiB reserved |
 
 ### 其他环节
 
@@ -213,9 +206,14 @@ SFT 带来了主要能力提升，让模型学会合法工具调用、长程搜�
 - Linux；
 - NVIDIA GPU 和兼容的 CUDA Driver；
 - [`uv`](https://docs.astral.sh/uv/)；
-- 大约 25 GB 可用磁盘空间，用于依赖、模型权重和运行产物；
-- SFT 配置按照 48 GB 显存设计；
-- GRPO 配置按照单张 96 GB GPU 验证。
+- 大约 150 GB 可用磁盘空间，用于依赖、模型权重和运行产物（GRPO 每 50 步一个约
+  11 GB 的 checkpoint，完整 500 步约 105 GB）；
+- SFT 在 24,576 序列长度下需要 `--liger-kernel`，峰值显存 16.7 GiB；
+- GRPO 在双卡 A40 46 GB 上实测通过（`configs/grpo.yaml` 已按要求配置），actor 峰值显存 15.7 GiB；
+- 多卡 GRPO 需要 `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1`，否则所有 rank 都会跑到
+  GPU0 上，并触发 NCCL `Duplicate GPU detected`；
+- 容器 `/dev/shm` 小于约 10 GB 时，`data.dataloader_num_workers` 必须为 0，否则 DataLoader
+  worker 会被 OOM kill。
 
 主训练环境使用 Python 3.12，ShopSimulator 使用隔离的 Python 3.10 环境。
 `scripts/setup.sh` 会通过 `uv` 创建并安装两套环境。
@@ -254,8 +252,13 @@ bash scripts/serve_model.sh Qwen/Qwen3.5-2B
 在第三个终端评估：
 
 ```bash
+export OPENAI_BASE_URL=https://your-provider.example/v1
+export OPENAI_API_KEY=your-key
 bash scripts/baseline.sh
 ```
+
+`OPENAI_BASE_URL / OPENAI_API_KEY` 配置 Flash Curator/Judge；
+`LLM_BASE_URL / LLM_API_KEY` 只配置 Actor（默认本地 vLLM）。
 
 开始训练前请停止模型服务，释放 GPU 显存。
 
@@ -382,14 +385,9 @@ bash scripts/grpo.sh --logger swanlab
 
 ## 文档导航
 
-- [数据采集与数据来源](docs/data-collection.md)
-- [LoRA SFT](docs/sft.md)
-- [使用 veRL 进行 GRPO](docs/grpo.md)
-- [留出集评估](docs/evaluation.md)
-- [Final-200 Clean 测试集说明](docs/evaluation-dataset.md)
-- [Final-200 Benchmark Dashboard（历史）](docs/evaluation-dashboard.html)
-- [Reward v3 设计](docs/reward-v3.md)
-- [可审计实验结果](experiments/comparison.md)
+- [数据采集、SFT 与 GRPO](docs/sft.md)
+- [Final-200 Clean 评估](docs/evaluation.md)
+- [Reward v3](docs/reward-v3.md)
 
 ## 后续改进计划
 

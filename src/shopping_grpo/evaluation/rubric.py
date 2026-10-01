@@ -553,16 +553,16 @@ def materialize_rubric_bundle(
         for item in candidate_rows
         if isinstance(item, Mapping)
     }
+    query = str(task_facts.get("query") or "")
     response = validate_curator_response(
         curator_response,
         candidate_ids=by_id,
+        query=query,
     )
-    query = str(task_facts.get("query") or "")
     rubrics = []
     for selected in response["selected_constraints"]:
         candidate = by_id[selected["candidate_id"]]
         hardness = selected["hardness"]
-        quote_spans = _spans_from_quote(query, selected.get("query_quote", ""))
         rubrics.append(
             {
                 "rubric_id": f"r{len(rubrics) + 1:04d}",
@@ -571,12 +571,7 @@ def materialize_rubric_bundle(
                 "description": selected["description"].strip(),
                 "hardness": hardness,
                 "hardness_source": candidate["hardness_source"],
-                # Query spans are code-owned evidence. A curator paraphrase
-                # falls back to the extractor's already validated spans.
-                "query_spans": (
-                    quote_spans
-                    or deepcopy(candidate.get("query_spans") or [])
-                ),
+                "query_spans": _spans_from_quote(query, selected["query_quote"]),
                 "field_path": candidate["field_path"],
                 "operator": candidate["operator"],
                 "expected_value": deepcopy(candidate["expected_value"]),

@@ -192,7 +192,7 @@ def build_trajectory_judge_messages(
     rubric_bundle: Mapping,
     deterministic_metrics: Mapping,
 ) -> list[dict]:
-    """Build one Pro request with exactly the evidence the Actor could use."""
+    """Build one Judge request with exactly the evidence the Actor could use."""
 
     rubric = validate_rubric_bundle(
         rubric_bundle,

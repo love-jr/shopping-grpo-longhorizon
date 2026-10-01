@@ -132,6 +132,8 @@ def validate_rubric_bundle(
     rubric_ids = set()
     candidate_ids = set()
     rubrics = _list(payload.get("rubrics"), "rubric_bundle.rubrics")
+    if not rubrics:
+        raise ContractValidationError("rubric_bundle.rubrics must not be empty")
     for index, item_value in enumerate(rubrics):
         path = f"rubric_bundle.rubrics[{index}]"
         item = _mapping(item_value, path)
@@ -165,6 +167,8 @@ def validate_rubric_bundle(
             raise ContractValidationError(f"{path}.expected_value is required")
         _unique_nonempty_strings(item.get("data_sources"), f"{path}.data_sources")
         spans = _list(item.get("query_spans"), f"{path}.query_spans")
+        if not spans:
+            raise ContractValidationError(f"{path}.query_spans must not be empty")
         for span_index, span_value in enumerate(spans):
             span_path = f"{path}.query_spans[{span_index}]"
             span = _mapping(span_value, span_path)
@@ -187,8 +191,9 @@ def validate_curator_response(
     response: object,
     *,
     candidate_ids: Iterable[str],
+    query: str,
 ) -> dict:
-    """Ensure Flash selected only constraints supplied by deterministic code."""
+    """Ensure Flash selects only supplied candidates with direct Query evidence."""
 
     payload = _mapping(response, "curator_response")
     allowed = {str(candidate_id) for candidate_id in candidate_ids}
@@ -196,6 +201,8 @@ def validate_curator_response(
         payload.get("selected_constraints"),
         "curator_response.selected_constraints",
     )
+    if not selected:
+        raise ContractValidationError("curator_response.selected_constraints must not be empty")
     seen = set()
     for index, item_value in enumerate(selected):
         path = f"curator_response.selected_constraints[{index}]"
@@ -218,9 +225,11 @@ def validate_curator_response(
             raise ContractValidationError(
                 f"{path}.hardness must be one of {sorted(RUBRIC_HARDNESS)}"
             )
-        quote = item.get("query_quote")
-        if quote is not None and not isinstance(quote, str):
-            raise ContractValidationError(f"{path}.query_quote must be a string")
+        quote = _nonempty_text(item.get("query_quote"), f"{path}.query_quote")
+        if quote not in query:
+            raise ContractValidationError(
+                f"{path}.query_quote must be a literal substring of the task query"
+            )
         _nonempty_text(
             item.get("selection_reason"), f"{path}.selection_reason"
         )
@@ -235,7 +244,7 @@ def validate_judge_result(
     expected_trajectory_id: str | None = None,
     allowed_event_ids: Iterable[str] | None = None,
 ) -> dict:
-    """Validate one Pro Judge result without manufacturing missing scores."""
+    """Validate one Flash Judge result without manufacturing missing scores."""
 
     payload = _mapping(result, "judge_result")
     if payload.get("schema_version") != JUDGE_SCHEMA_VERSION:

@@ -13,10 +13,8 @@ from http.client import RemoteDisconnected
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-DEFAULT_FLASH_MODEL = "deepseek-v4-flash"
-DEFAULT_PRO_MODEL = "deepseek-v4-pro"
 RETRYABLE_HTTP_STATUSES = frozenset(
-    {408, 409, 429, 500, 502, 503, 504}
+    {403, 408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524}
 )
 
 
