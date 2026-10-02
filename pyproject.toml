@@ -9,6 +9,8 @@ description = "ShopSimulator shopping-agent post-training and trajectory evaluat
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  # 不加 [conv1d]：causal-conv1d 仅源码包，1.7.0 依赖 torch>2.11 的符号，导入即崩。
+  "flash-linear-attention>=0.5.2",
   "tqdm>=4.66,<5",
 ]
 
@@ -22,10 +24,10 @@ sft = [
   "torchvision",
   "pillow",
   "swanlab>=0.8,<1",
+  "liger-kernel>=0.6,<1",
 ]
 sft-accelerated = [
   "bitsandbytes>=0.45,<1",
-  "liger-kernel>=0.6,<1",
 ]
 grpo = [
   "verl==0.8.0",

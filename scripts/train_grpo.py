@@ -60,6 +60,23 @@ def _validated_path(path: Path, description: str) -> Path:
     return resolved
 
 
+def hydra_overrides(args: argparse.Namespace) -> list[str]:
+    """Return the Hydra overrides shared by the trainer command and its preflight."""
+    logger_override = (
+        "trainer.logger=[console,swanlab]"
+        if args.logger == "swanlab"
+        else "trainer.logger=[console]"
+    )
+    extra = list(args.hydra_overrides)
+    if extra[:1] == ["--"]:
+        extra = extra[1:]
+    return [
+        logger_override,
+        f"trainer.experiment_name={args.experiment_name}",
+        *extra,
+    ]
+
+
 def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
     model = _validated_path(args.model, "model directory")
     if not model.is_dir() or not (model / "config.json").is_file():
@@ -108,26 +125,13 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
                 "SWANLAB_LOG_DIR": str(output / "swanlab"),
             }
         )
-    logger_override = (
-        "trainer.logger=[console,swanlab]"
-        if args.logger == "swanlab"
-        else "trainer.logger=[console]"
-    )
-    overrides = [
-        logger_override,
-        f"trainer.experiment_name={args.experiment_name}",
-    ]
-    extra = list(args.hydra_overrides)
-    if extra[:1] == ["--"]:
-        extra = extra[1:]
     command = [
         sys.executable,
         "-m",
         "verl.trainer.main_ppo",
         f"--config-path={config.parent}",
         f"--config-name={config.stem}",
-        *overrides,
-        *extra,
+        *hydra_overrides(args),
     ]
     return command, environment
 
@@ -152,8 +156,7 @@ def main() -> None:
     preflight = [
         sys.executable,
         str(ROOT / "scripts/check_grpo_runtime.py"),
-        *overrides,
-        *extra,
+        *hydra_overrides(args),
     ]
     preflight_status = subprocess.call(preflight, cwd=ROOT, env=environment)
     if preflight_status:

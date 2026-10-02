@@ -14,7 +14,8 @@ cd "$ROOT"
   --output "$ADAPTER_DIR" \
   --dtype auto \
   --gradient-checkpointing \
-  --attention-implementation sdpa
+  --attention-implementation sdpa \
+  --liger-kernel
 
 exec "$ROOT/.venv/bin/python" scripts/merge_lora_adapter.py \
   --base-model "$BASE_MODEL" \
