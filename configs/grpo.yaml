@@ -84,7 +84,7 @@ actor_rollout_ref:
       max_parallel_calls: 1
       max_tool_response_length: 16384
       tool_response_truncate_side: middle
-      tool_config_path: ${oc.env:SHOPPING_GRPO_ROOT}/configs/tools.json
+      tool_config_path: ${oc.env:SHOPPING_TOOL_CONFIG}
       tokenization_sanity_check_mode: ignore_strippable
     val_kwargs:
       n: 1

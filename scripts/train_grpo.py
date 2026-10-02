@@ -10,10 +10,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from shopping_grpo.environment.tools import SHOP_TOOL_SCHEMAS
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "configs/grpo.yaml"
 DEFAULT_AGENT_CONFIG = ROOT / "configs/agent_loop.yaml"
-DEFAULT_TOOL_CONFIG = ROOT / "configs/tools.json"
 DEFAULT_MANIFEST = ROOT / "data/environment.json"
 DEFAULT_MODEL = ROOT / "outputs/models/sft-merged"
 DEFAULT_TRAIN_DATA = ROOT / "data/grpo/train.parquet"
@@ -114,7 +115,7 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
             ),
             "SHOPSIM_BASE_URL": str(args.env_url),
             "SHOPPING_AGENT_LOOP_CONFIG": str(DEFAULT_AGENT_CONFIG),
-            "SHOPPING_TOOL_CONFIG": str(DEFAULT_TOOL_CONFIG),
+            "SHOPPING_TOOL_CONFIG": str(output / "tools.json"),
             "GRPO_CONFIG_NAME": config.stem,
         }
     )
@@ -153,6 +154,21 @@ def main() -> None:
     if args.dry_run:
         return
     Path(environment["GRPO_OUTPUT_DIR"]).mkdir(parents=True, exist_ok=True)
+    Path(environment["SHOPPING_TOOL_CONFIG"]).write_text(
+        json.dumps(
+            {"tools": [
+                {
+                    "class_name": "shopping_grpo.training.grpo.adapter.tools.ShopSimulatorTool",
+                    "config": {"type": "native"},
+                    "tool_schema": schema,
+                }
+                for schema in SHOP_TOOL_SCHEMAS
+            ]},
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
     preflight = [
         sys.executable,
         str(ROOT / "scripts/check_grpo_runtime.py"),

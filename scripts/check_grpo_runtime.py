@@ -89,20 +89,6 @@ def validate_environment_contract():
             "environment manifest version mismatch: "
             f"expected {required_version}, got {actual_environment_version}"
         )
-    tools_path = Path(
-        os.environ.get(
-            "SHOPPING_TOOL_CONFIG",
-            Path(__file__).resolve().parents[1]
-            / "configs/tools.json",
-        )
-    )
-    tools = json.loads(tools_path.read_text(encoding="utf-8")).get("tools", [])
-    tool_names = {
-        item.get("tool_schema", {}).get("function", {}).get("name")
-        for item in tools
-    }
-    if "finish_without_purchase" not in tool_names:
-        raise SystemExit("Environment v2 tool config is missing finish_without_purchase")
     if int(manifest["max_steps"]) != 35:
         raise SystemExit("Environment v2 GRPO contract requires max_steps=35")
     validate_reward_runtime_files(

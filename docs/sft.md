@@ -42,6 +42,8 @@ bash scripts/sft.sh
 `data/grpo/{train,validation}.parquet`（1,000 / 50 tasks）。
 使用固定 `verl==0.8.0`、项目 AgentLoop/工具适配层及 setup 中的 SHA-256 校验补丁；
 不复制 veRL 源码。Reward 直接来自环境，不使用 LLM Judge 训练奖励。
+工具 Schema 只维护在 `src/shopping_grpo/environment/tools.py`。
+GRPO 启动时生成运行目录的 `tools.json`，训练读取该文件；`--dry-run` 不写产物。
 
 ```bash
 bash scripts/grpo.sh --dry-run
