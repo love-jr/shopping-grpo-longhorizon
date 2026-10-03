@@ -53,6 +53,10 @@ bash scripts/export_grpo.sh \
   outputs/models/grpo/global_step_100/actor outputs/models/grpo-merged
 ```
 
+导出产物的 LoRA 在 `lora_adapter/`，不在主体 `model.safetensors` 中。
+`serve_model.sh` 会加载 LoRA 并将 `shopping-agent` 指向它；`shopping-agent-base` 是未应用 LoRA 的基座。
+启动后从 `/v1/models` 核对 adapter，使用独立标签保存各 checkpoint 的评估结果。
+
 配置以 [`configs/grpo.yaml`](../configs/grpo.yaml) 为准：每题 4 条 rollout，
 学习率 `1e-6`，最多 500 optimizer steps；每 50 步保存和验证。
 动态采样最多重采 3 批，最多连续跳过 10 次无信号更新。

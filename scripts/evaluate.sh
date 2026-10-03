@@ -11,8 +11,10 @@ SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-shopping-agent}"
 
 mkdir -p "$OUTPUT_DIR"
 cd "$ROOT"
-: "${OPENAI_BASE_URL:?设置 Flash API 的 OPENAI_BASE_URL；LLM_BASE_URL 仅用于 Actor}"
-: "${OPENAI_API_KEY:?设置 Flash API 的 OPENAI_API_KEY}"
+if [[ "${EVAL_RUBRIC_JUDGE:-0}" == "1" ]]; then
+  : "${OPENAI_BASE_URL:?设置 Flash API 的 OPENAI_BASE_URL；LLM_BASE_URL 仅用于 Actor}"
+  : "${OPENAI_API_KEY:?设置 Flash API 的 OPENAI_API_KEY}"
+fi
 "$ROOT/.venv/bin/python" scripts/evaluate_shop_benchmark.py \
   --benchmark data/evaluation/tasks.jsonl \
   --output "$OUTPUT_DIR/trajectories.jsonl" \
@@ -23,6 +25,10 @@ cd "$ROOT"
   --api-key "$LLM_API_KEY"
 
 "$ROOT/.venv/bin/python" scripts/build_eval_report.py --run-dir "$OUTPUT_DIR"
+
+if [[ "${EVAL_RUBRIC_JUDGE:-0}" != "1" ]]; then
+  exit 0
+fi
 
 JUDGE_DIR="$OUTPUT_DIR/judge"
 SHARED_DIR="${EVAL_SHARED_DIR:-$ROOT/outputs/evaluation/judge-shared}"

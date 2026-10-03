@@ -2,8 +2,6 @@
 
 <div align="center">
 
-**简体中文** · [English](README.en.md)
-
 <br />
 
 面向长程购物 Agent 的可复现后训练与评测项目
@@ -106,9 +104,10 @@ AgentLoop、工具适配层、运行时兼容代码和一个带 SHA-256 校验�
 
 ### 评估流水线是怎么设计的？
 
-**DeepSeek V4 Flash 同时负责 Rubric 整理和轨迹评分。** Rubric 从代码生成的候选中选出
-Query 明确表达的约束，轨迹评分只看到用户需求、冻结 Rubric 和 Actor 可见轨迹；不提供
-Reward 分数、Gold 私有字段或 raw observation。Judge 结果按 schema 和真实 event_id 校验。
+**默认评估只运行 Actor rollout、确定性指标和 HTML 报告，不调用 Rubric Curator 或轨迹 Judge。**
+只有明确需要语义诊断时，才用 `EVAL_RUBRIC_JUDGE=1 bash scripts/evaluate.sh NAME` 开启下述额外流程。
+DeepSeek V4 Flash 从代码候选中选择 Query 明确表达的约束，再对 Actor 可见轨迹评分；
+不提供 Reward 分数、Gold 私有字段或 raw observation，结果按 schema 和真实 event_id 校验。
 这里的 Rubric 是逐任务评分标准，不是向量检索式 RAG。
 
 ```mermaid
@@ -149,19 +148,16 @@ Prompt、输入隔离、产物与 Final-200 Clean 筛选口径见
 
 ## 实验结果
 
-本仓库在 Final-200 Clean（SHA-256 `d99112a2…`）上复现了完整流程，双卡 NVIDIA
-A40 46 GB：
+下表为 Final-200 Clean 的 200 题 rollout 结果；GRPO 使用已验证加载的 LoRA adapter。
 
 | 模型 | 严格成功率 | 购买成功率 | 完成终局率 | 平均 Reward | 平均步数 |
 |---|---:|---:|---:|---:|---:|
 | Qwen3.5-2B Baseline | 0.50% | 0.50% | 24.0% | -0.1362 | 6.43 |
 | LoRA SFT | 62.50% | 62.50% | 99.5% | 0.4979 | 8.86 |
-| GRPO step 100 | 63.50% | 63.50% | 100% | 0.5117 | 8.75 |
-| GRPO step 500 | 62.50% | 62.50% | 100% | 0.4981 | 8.90 |
+| GRPO step 100（LoRA） | 62.50% | 62.50% | 99.5% | 0.5088 | 9.03 |
+| GRPO step 500（LoRA） | 69.50% | 69.50% | 98.0% | 0.6136 | 9.45 |
 
-SFT 带来了主要能力提升。上表为 Final-200 Clean rollout 结果，不是新 Flash Judge 的评分；
-对应摘要位于本地 `outputs/evaluation/{baseline,sft,grpo-step100,grpo-step500}/summary.json`。
-`experiments/` 保留旧 Benchmark 结果，不能作为上表证据或直接比较。
+结果摘要位于 `outputs/evaluation/{baseline,sft,grpo-step100-lora-final200,grpo-step500-lora-final200}/summary.json`。
 
 ## 训练硬件与耗时
 
@@ -252,13 +248,11 @@ bash scripts/serve_model.sh Qwen/Qwen3.5-2B
 在第三个终端评估：
 
 ```bash
-export OPENAI_BASE_URL=https://your-provider.example/v1
-export OPENAI_API_KEY=your-key
 bash scripts/baseline.sh
 ```
 
-`OPENAI_BASE_URL / OPENAI_API_KEY` 配置 Flash Curator/Judge；
-`LLM_BASE_URL / LLM_API_KEY` 只配置 Actor（默认本地 vLLM）。
+`LLM_BASE_URL / LLM_API_KEY` 配置 Actor（默认本地 vLLM）；默认评估不需要 Flash 凭据。
+仅显式开启 `EVAL_RUBRIC_JUDGE=1` 时，另设 `OPENAI_BASE_URL / OPENAI_API_KEY` 配置 Flash Curator/Judge。
 
 开始训练前请停止模型服务，释放 GPU 显存。
 
@@ -300,6 +294,9 @@ bash scripts/export_grpo.sh \
 bash scripts/serve_model.sh outputs/models/grpo-merged
 bash scripts/evaluate.sh grpo
 ```
+
+`serve_model.sh` 检测到 `lora_adapter/` 时，将其注册为 `shopping-agent` 并作为评估请求的模型；
+未应用 LoRA 的基座另列为 `shopping-agent-base`。启动后先从 `/v1/models` 核对两者。
 
 每次 `evaluate.sh` 完成后会自动生成 `outputs/evaluation/grpo/report.html`。对已有评测结果补生成报告：
 
