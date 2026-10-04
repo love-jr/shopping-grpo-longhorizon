@@ -44,7 +44,11 @@ def action_reject_reason(name, arguments, observation):
             return "invalid_finish_reason"
         return None
     if name == "search_products":
-        if "搜索功能是否可用: False" in observation:
+        footer = re.search(
+            r"(?m)^搜索功能是否可用: (True|False)\n+可点击的按钮: \[[^\n]*\]\s*\Z",
+            observation,
+        )
+        if footer and footer.group(1) == "False":
             return "search_not_available_on_current_page"
         return None
     if not observation:
@@ -124,7 +128,7 @@ def product_ids(observation):
 
 def clickable_buttons(observation):
     """读取 observation footer 中当前页面实际可点击的按钮。"""
-    match = re.search(r"可点击的按钮:\s*(\[[^\n]*\])", observation)
+    match = re.search(r"(?m)^可点击的按钮:\s*(\[[^\n]*\])[ \t]*\s*\Z", observation)
     if not match:
         return []
     try:

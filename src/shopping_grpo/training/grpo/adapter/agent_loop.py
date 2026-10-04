@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
-import json
-
 from verl.experimental.agent_loop.tool_agent_loop import AgentState, ToolAgentLoop
+from verl.utils.chat_template import apply_chat_template as render_chat_template
+from verl.utils.tokenizer import normalize_token_ids
 
 from shopping_grpo.environment.context import ContextBudgetError, compact_token_trajectory
 from shopping_grpo.environment.projection import (
@@ -43,7 +43,7 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
         context_input_budget_tokens=16384,
         context_preserve_recent_groups=1,
         context_compaction_enable=False,
-        observation_token_budget=1536,
+        observation_token_budget=4096,
         observation_detail_token_budget=4096,
         observation_generic_token_budget=768,
         observation_search_top_k=20,
@@ -107,6 +107,28 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
         if min(self.reward_length_penalty_per_step, self.reward_length_max_penalty) < 0:
             raise ValueError("reward length penalties must be non-negative")
         self.env_factory = env_factory
+
+    async def apply_chat_template(
+        self, messages, tools=None, images=None, videos=None, audios=None,
+        mm_processor_kwargs=None, remove_system_prompt=False,
+    ):
+        # 初始 prompt 仍由 veRL 管理；增量工具消息属于 response，不能套用 prompt 的左截断。
+        if not remove_system_prompt:
+            return await super().apply_chat_template(
+                messages, tools=tools, images=images, videos=videos, audios=audios,
+                mm_processor_kwargs=mm_processor_kwargs,
+            )
+        if images or videos or audios:
+            raise ValueError("ShopSimulator tool observations must be text-only")
+        processing_class = self.processor if self.processor is not None else self.tokenizer
+        tokens = await self.loop.run_in_executor(
+            None,
+            lambda: render_chat_template(
+                processing_class, messages, tools=tools, tokenize=True,
+                add_generation_prompt=True, **self.apply_chat_template_kwargs,
+            ),
+        )
+        return normalize_token_ids(tokens)[len(self.system_prompt):]
 
     async def _handle_generating_state(
         self,
@@ -199,11 +221,9 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
         try:
             # 解析失败或投影破坏动作契约时，停止当前样本而不是把坏 observation
             # 继续喂给模型。
-            parameters = json.loads(tool_call.arguments or "{}")
             visible_observation, projection = project_observation(
                 tool_name=tool_call.name,
                 observation=raw_observation,
-                parameters=parameters,
                 count_tokens=lambda text: len(
                     self.tokenizer.encode(text, add_special_tokens=False)
                 ),
@@ -246,6 +266,11 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
         runtime_state = current_runtime_state.get()
         if runtime_state is not None and runtime_state.get("terminate"):
             return AgentState.TERMINATED
+        if next_state == AgentState.TERMINATED and runtime_state is not None:
+            runtime_state["terminate"] = True
+            runtime_state["termination_reason"] = "tool_response_budget_exhausted"
+            runtime_state["error"] = runtime_state["termination_reason"]
+            runtime_state["infrastructure_invalid"] = True
         return next_state
 
     async def run(self, sampling_params, **kwargs):
@@ -258,8 +283,8 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
             required_environment_version=self.required_environment_version,
             env_factory=self.env_factory,
         )
-        state = await session.start(task_id)
         try:
+            state = await session.start(task_id)
             output = await super().run(sampling_params, **kwargs)
             if not state["done"] and not state["error"]:
                 state["error"] = "assistant_finished_without_environment_done"

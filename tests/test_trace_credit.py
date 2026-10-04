@@ -43,7 +43,13 @@ class TraceCreditTest(unittest.TestCase):
 
             def reset(self, _task_id):
                 return {
-                    "instruction": "买一双黑色 42 码鞋",
+                    "environment_version": "shopsimulator-environment-v2.1",
+                    "observation_state": {
+                        "observation_version": "shopping-observation-v2",
+                        "page_type": "search_home",
+                        "search_available": True,
+                        "actions": [],
+                    },
                     "_trace_target": {
                         "asin": "123456789012",
                         "options": {"颜色": "黑色", "尺寸": "42"},

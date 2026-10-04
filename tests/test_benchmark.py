@@ -1,8 +1,15 @@
 """验证固定评测集的统计口径。"""
 
+import json
+import sys
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 import unittest
 
 from shopping_grpo.evaluation.summary import summarize_trajectories
+from scripts import evaluate_shop_benchmark
+from shopping_grpo.evaluation.rollout import CollectionInfrastructureError, append_jsonl
 
 
 def _trajectory(task_id, strict=False, steps=3, status="done", blocked=None):
@@ -85,6 +92,51 @@ class BenchmarkTest(unittest.TestCase):
             projection["success_by_truncation_bucket"]["none"],
             {"tasks": 1, "strict_successes": 0},
         )
+
+
+class BenchmarkOutputTest(unittest.TestCase):
+    def test_existing_trajectories_are_rejected_without_changing_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            benchmark = root / "tasks.jsonl"
+            benchmark.write_text('{"task_id": 10}\n', encoding="utf-8")
+            output = root / "trajectories.jsonl"
+            summary = root / "summary.json"
+            rows = json.dumps(_trajectory(10, strict=True)) + "\n"
+            output.write_text(rows, encoding="utf-8")
+            summary.write_text('{"protocol": {"model": "old-model"}}', encoding="utf-8")
+            original_summary = summary.read_bytes()
+            argv = ["evaluate_shop_benchmark.py", "--benchmark", str(benchmark),
+                    "--output", str(output), "--summary", str(summary),
+                    "--model", "new-model", "--llm-base-url", "http://unused", "--api-key", "EMPTY"]
+            with patch.object(sys, "argv", argv), self.assertRaises(FileExistsError):
+                evaluate_shop_benchmark.main()
+            self.assertEqual(output.read_text(encoding="utf-8"), rows)
+            self.assertEqual(summary.read_bytes(), original_summary)
+
+    def test_interruption_preserves_fixed_denominator_and_missing_tasks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            benchmark = root / "tasks.jsonl"
+            benchmark.write_text('{"task_id": 10}\n{"task_id": 11}\n', encoding="utf-8")
+            output = root / "trajectories.jsonl"
+            summary_path = root / "summary.json"
+            argv = ["evaluate_shop_benchmark.py", "--benchmark", str(benchmark),
+                    "--output", str(output), "--summary", str(summary_path),
+                    "--model", "shopping-agent", "--llm-base-url", "http://unused", "--api-key", "EMPTY"]
+
+            def interrupt(tasks, **kwargs):
+                append_jsonl(output, [_trajectory(10, status="error")])
+                raise CollectionInfrastructureError("interrupted")
+
+            with patch.object(sys, "argv", argv), patch.object(evaluate_shop_benchmark, "collect_tasks", interrupt):
+                with self.assertRaises(CollectionInfrastructureError):
+                    evaluate_shop_benchmark.main()
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(summary["expected_task_ids"], [10, 11])
+            self.assertEqual(summary["missing_tasks"], [11])
+            self.assertEqual(summary["strict_success_rate"], 0.0)
+
 
 
 if __name__ == "__main__":  # pragma: no cover

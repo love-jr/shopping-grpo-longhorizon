@@ -7,6 +7,7 @@ from pathlib import Path
 
 from shopping_grpo.evaluation.summary import summarize_trajectories
 from shopping_grpo.evaluation.rollout import OpenAIChatClient, collect_tasks, load_tasks
+from shopping_grpo.evaluation.artifacts import write_json_atomic
 
 
 def parse_args():
@@ -43,7 +44,7 @@ def parse_args():
     parser.add_argument(
         "--observation-token-budget",
         type=int,
-        default=1536,
+        default=4096,
         help="Observation token 预算；传 0 禁用 vLLM /tokenize 依赖。",
     )
     parser.add_argument("--observation-detail-token-budget", type=int, default=4096)
@@ -54,8 +55,6 @@ def parse_args():
 
 def _read_jsonl(path):
     path = Path(path)
-    if not path.exists():
-        return []
     with path.open(encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
 
@@ -73,6 +72,22 @@ def main():
     if args.observation_token_budget < 0:
         raise SystemExit("--observation-token-budget 不能为负数")
     tasks = load_tasks(args.benchmark)
+    protocol = {
+        "benchmark": str(args.benchmark),
+        "model": args.model,
+        "reward_contract": "shopsimulator-reward-v3",
+        "max_steps": args.max_steps,
+        "max_tokens": args.max_tokens,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+        "context_window": args.context_window,
+        "context_safety_margin": args.context_safety_margin,
+        "context_compaction": args.context_compaction,
+        "observation_token_budget": args.observation_token_budget,
+        "observation_detail_token_budget": args.observation_detail_token_budget,
+        "observation_generic_token_budget": args.observation_generic_token_budget,
+        "observation_search_top_k": args.observation_search_top_k,
+    }
     client = OpenAIChatClient(
         model=args.model,
         base_url=args.llm_base_url,
@@ -89,34 +104,22 @@ def main():
         observation_generic_token_budget=args.observation_generic_token_budget,
         observation_search_top_k=args.observation_search_top_k,
     )
-    collect_tasks(
-        tasks,
-        client=client,
-        output_path=args.output,
-        base_url=args.base_url,
-        max_steps=args.max_steps,
-    )
-    summary = summarize_trajectories(
-        [task["task_id"] for task in tasks], _read_jsonl(args.output)
-    )
-    summary["protocol"] = {
-        "benchmark": str(args.benchmark),
-        "model": args.model,
-        "reward_contract": "shopsimulator-reward-v3",
-        "max_steps": args.max_steps,
-        "max_tokens": args.max_tokens,
-        "temperature": args.temperature,
-        "top_p": args.top_p,
-        "context_window": args.context_window,
-        "context_safety_margin": args.context_safety_margin,
-        "context_compaction": args.context_compaction,
-        "observation_token_budget": args.observation_token_budget,
-        "observation_detail_token_budget": args.observation_detail_token_budget,
-        "observation_generic_token_budget": args.observation_generic_token_budget,
-        "observation_search_top_k": args.observation_search_top_k,
-    }
-    args.summary.parent.mkdir(parents=True, exist_ok=True)
-    args.summary.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.open("x", encoding="utf-8").close()
+    try:
+        collect_tasks(
+            tasks,
+            client=client,
+            output_path=args.output,
+            base_url=args.base_url,
+            max_steps=args.max_steps,
+        )
+    finally:
+        summary = summarize_trajectories(
+            [task["task_id"] for task in tasks], _read_jsonl(args.output)
+        )
+        summary["protocol"] = protocol
+        write_json_atomic(args.summary, summary, force=True)
     print(json.dumps(summary, ensure_ascii=False))
 
 

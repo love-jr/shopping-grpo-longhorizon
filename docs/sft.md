@@ -21,6 +21,10 @@ export OPENAI_API_KEY=your-key
 重复运行会从 `raw.jsonl` 续跑；只重建派生数据时加 `--build-only`。
 审核 `reject_stats.json`、数据划分和 metadata 后再更新 `data/sft/`；原始轨迹不提交。
 
+教师采集默认保留完整 observation，不依赖 vLLM 的 `/tokenize`；GRPO/本地评估按
+[评估指南](evaluation.md)做 token 预算投影。需要完全一致的输入时，采集服务必须支持
+`/tokenize`，并显式传 `--observation-token-budget 4096`；已有冻结数据不自动重写。
+
 ## SFT
 
 ```bash

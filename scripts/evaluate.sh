@@ -15,6 +15,7 @@ if [[ "${EVAL_RUBRIC_JUDGE:-0}" == "1" ]]; then
   : "${OPENAI_BASE_URL:?设置 Flash API 的 OPENAI_BASE_URL；LLM_BASE_URL 仅用于 Actor}"
   : "${OPENAI_API_KEY:?设置 Flash API 的 OPENAI_API_KEY}"
 fi
+if [[ "${EVAL_RUBRIC_JUDGE:-0}" != "1" || ( "${EVAL_RESUME:-0}" != "1" && "${EVAL_FORCE:-0}" != "1" ) ]]; then
 "$ROOT/.venv/bin/python" scripts/evaluate_shop_benchmark.py \
   --benchmark data/evaluation/tasks.jsonl \
   --output "$OUTPUT_DIR/trajectories.jsonl" \
@@ -23,6 +24,7 @@ fi
   --model "$SERVED_MODEL_NAME" \
   --llm-base-url "$LLM_BASE_URL" \
   --api-key "$LLM_API_KEY"
+fi
 
 "$ROOT/.venv/bin/python" scripts/build_eval_report.py --run-dir "$OUTPUT_DIR"
 

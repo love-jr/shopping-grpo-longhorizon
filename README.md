@@ -251,7 +251,7 @@ bash scripts/serve_model.sh Qwen/Qwen3.5-2B
 bash scripts/baseline.sh
 ```
 
-`LLM_BASE_URL / LLM_API_KEY` 配置 Actor（默认本地 vLLM）；默认评估不需要 Flash 凭据。
+`LLM_BASE_URL / LLM_API_KEY` 配置 Actor（默认本地 vLLM）；运行配置见[评估文档](docs/evaluation.md)。默认评估不需要 Flash 凭据。
 仅显式开启 `EVAL_RUBRIC_JUDGE=1` 时，另设 `OPENAI_BASE_URL / OPENAI_API_KEY` 配置 Flash Curator/Judge。
 
 开始训练前请停止模型服务，释放 GPU 显存。

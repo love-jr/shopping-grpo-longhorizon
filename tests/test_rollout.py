@@ -6,12 +6,10 @@ from pathlib import Path
 from urllib.error import URLError
 from unittest.mock import patch
 
-from shopping_grpo.environment.actions import action_guard_tool_message
 from shopping_grpo.environment.client import ShopEnvironmentError
 from shopping_grpo.evaluation.rollout import (
     CollectionInfrastructureError,
     OpenAIChatClient,
-    SYSTEM_PROMPT,
     collect_tasks,
     collect_for_task,
     completed_task_attempts,
@@ -32,7 +30,7 @@ class FakeEnv:
         self.actions.append(action)
         if action == "search[乳胶枕]":
             return {
-                "instruction": "results [SEP] 100000000001 [SEP] 乳胶枕",
+                "instruction": '格式: rank|asin|price|brand|category|key_attributes|title\n1|100000000001|199|测试品牌|家居›枕头|乳胶|乳胶枕\n\n搜索功能是否可用: True\n\n可点击的按钮: ["100000000001"]',
                 "reward": 0.0,
                 "done": False,
             }
@@ -84,7 +82,7 @@ class GuardRecoveryEnv(FakeEnv):
         self.actions.append(action)
         if action == "search[乳胶枕]":
             return {
-                "instruction": "results [SEP] 100000000001 [SEP] 乳胶枕",
+                "instruction": '格式: rank|asin|price|brand|category|key_attributes|title\n1|100000000001|199|测试品牌|家居›枕头|乳胶|乳胶枕\n\n搜索功能是否可用: True\n\n可点击的按钮: ["100000000001"]',
                 "reward": 0.0,
                 "done": False,
             }
@@ -143,42 +141,55 @@ def assistant_tool(name, arguments, call_id="call_1"):
 
 
 class RolloutTest(unittest.TestCase):
-    def test_default_prompt_matches_reward_policy(self):
-        """默认提示词应表达 Reward v3 的购买优先级和停止门槛。"""
-        self.assertIn("单轮购物任务", SYSTEM_PROMPT)
-        self.assertIn("不得向用户追问", SYSTEM_PROMPT)
-        self.assertIn("buy_now", SYSTEM_PROMPT)
-        self.assertIn("不要在任务结束前输出最终答复", SYSTEM_PROMPT)
-        self.assertIn("当前页面是动作合法性的唯一依据", SYSTEM_PROMPT)
-        self.assertIn("信息子页", SYSTEM_PROMPT)
-        self.assertIn("必须先调用当前页面可见的 `prev_page` 或 `back_to_search` 返回", SYSTEM_PROMPT)
-        self.assertIn("无参数工具", SYSTEM_PROMPT)
-        self.assertIn("历史 observation 可以用于记住和比较候选", SYSTEM_PROMPT)
-        self.assertIn("不能直接点击历史页面中的 ASIN", SYSTEM_PROMPT)
-        self.assertIn("品类必须正确", SYSTEM_PROMPT)
-        self.assertIn("不得超过用户明确预算", SYSTEM_PROMPT)
-        self.assertIn("品类 > 预算 > 品牌 > 型号与核心功能 > 规格属性", SYSTEM_PROMPT)
-        self.assertIn("Reviews 只用于辅助判断使用体验", SYSTEM_PROMPT)
-        self.assertIn("不能用于确认型号、官方功能、规格或价格", SYSTEM_PROMPT)
-        self.assertIn("所有影响可购买 variant 的必要规格轴", SYSTEM_PROMPT)
-        self.assertIn("finish_without_purchase", SYSTEM_PROMPT)
-        self.assertIn("多次有实质差异的搜索和多个候选核验", SYSTEM_PROMPT)
-        self.assertIn("没有明显值得继续核验的候选", SYSTEM_PROMPT)
-        self.assertIn("是否达到结束资格由环境判断", SYSTEM_PROMPT)
-        self.assertIn("不要连续重复同一动作", SYSTEM_PROMPT)
-        self.assertIn("不要调用 `think` 工具", SYSTEM_PROMPT)
+    def test_projection_preserves_page_across_think_and_skips_terminal_private_text(self):
+        class TerminalEnv(FakeEnv):
+            def step(self, action):
+                result = super().step(action)
+                if result.get("done"):
+                    result["instruction"] = "PRIVATE_REWARD" * 1000
+                return result
 
-    def test_guard_gives_a_return_only_instruction_on_information_subpage(self):
-        """子页误操作后，守卫应明确引导模型先返回，不重复猜测按钮。"""
-        message = action_guard_tool_message(
-            assistant_tool("view_attributes", {}, "call_attributes"),
-            "click_not_in_previous_observation",
-            '详情页内容\n\n可点击的按钮: ["< Prev"]',
+        replies = iter([
+            assistant_tool("search_products", {"query": "乳胶枕"}),
+            assistant_tool("open_product", {"asin": "100000000001"}),
+            assistant_tool("think", {"note": "长推理" * 500}),
+            assistant_tool("buy_now", {}),
+        ])
+        client = OpenAIChatClient(
+            "shopping", "http://llm.test/v1", "EMPTY",
+            observation_token_budget=4096, observation_token_counter=len,
+            transport=lambda *args: {"choices": [{"message": next(replies)}]},
         )
+        env = TerminalEnv()
+        trajectory = collect_for_task({"task_id": 7}, client, env_factory=lambda **kwargs: env, max_steps=4)
+        self.assertEqual(trajectory["status"], "done")
+        self.assertEqual(trajectory["final_reward"], 1.0)
+        self.assertEqual(trajectory["blocked_tool_calls"], [])
+        self.assertNotIn("PRIVATE_REWARD", str(trajectory["messages"]))
+        self.assertTrue(env.released)
 
-        self.assertIn("你处于信息子页", message["content"])
-        self.assertIn("prev_page", message["content"])
-        self.assertIn("不要重复使用历史页面目标", message["content"])
+    def test_projection_failure_keeps_executed_step_and_releases_environment(self):
+        class SearchEnv(FakeEnv):
+            def step(self, action):
+                self.actions.append(action)
+                return {"done": False, "reward": 0.0, "observation_state": {
+                    "observation_version": "shopping-observation-v2",
+                    "page_type": "search_results", "search_available": False,
+                    "actions": ["back to search", "100000000001"],
+                    "products": [{"asin": "100000000001", "rank": 1, "price": 12345.67, "title": "标题" * 100}],
+                }}
+
+        env = SearchEnv()
+        client = OpenAIChatClient(
+            "shopping", "http://llm.test/v1", "EMPTY",
+            observation_token_budget=64, observation_token_counter=len,
+            transport=lambda *args: {"choices": [{"message": assistant_tool("search_products", {"query": "杯"})}]},
+        )
+        trajectory = collect_for_task({"task_id": 7}, client, env_factory=lambda **kwargs: env)
+        self.assertEqual(trajectory["status"], "error")
+        self.assertEqual(trajectory["error"]["type"], "ObservationProjectionError")
+        self.assertEqual([s["env_action"] for s in trajectory["steps"]], ["search[杯]"])
+        self.assertTrue(env.released)
 
     def test_collect_for_task_executes_openai_tool_calls_until_done(self):
         client = MockClient(
@@ -275,7 +286,11 @@ class RolloutTest(unittest.TestCase):
             def step(self, action):
                 self.actions.append(action)
                 if action == "search[乳胶枕]":
-                    return {"instruction": "results [SEP] 100000000001", "reward": 0.0, "done": False}
+                    return {
+                        "instruction": '格式: rank|asin|price|brand|category|key_attributes|title\n1|100000000001|199|测试品牌|家居›枕头|乳胶|乳胶枕\n\n搜索功能是否可用: True\n\n可点击的按钮: ["100000000001"]',
+                        "reward": 0.0,
+                        "done": False,
+                    }
                 if action == "click[100000000001]":
                     return {
                         "instruction": 'detail\n\n可点击的按钮: ["满天星", "Description", "Buy Now"]',
@@ -334,7 +349,11 @@ class RolloutTest(unittest.TestCase):
             def step(self, action):
                 self.actions.append(action)
                 if action == "search[乳胶枕]":
-                    return {"instruction": "results [SEP] 100000000001", "reward": 0.0, "done": False}
+                    return {
+                        "instruction": '格式: rank|asin|price|brand|category|key_attributes|title\n1|100000000001|199|测试品牌|家居›枕头|乳胶|乳胶枕\n\n搜索功能是否可用: True\n\n可点击的按钮: ["100000000001"]',
+                        "reward": 0.0,
+                        "done": False,
+                    }
                 if action == "click[100000000001]":
                     return {
                         "instruction": 'detail\n\n可点击的按钮: ["满天星", "Buy Now"]',
@@ -768,27 +787,6 @@ class RolloutTest(unittest.TestCase):
         self.assertIn("latest page", str(captured["payload"]["messages"]))
         self.assertEqual(client.last_context_event["removed_groups"], 1)
         self.assertEqual(messages[3]["content"], "old page")
-
-    def test_openai_client_projects_tool_observation_with_serving_tokenizer(self):
-        client = OpenAIChatClient(
-            model="shopping",
-            base_url="http://127.0.0.1:8000/v1",
-            api_key="EMPTY",
-            observation_token_budget=128,
-            observation_generic_token_budget=128,
-            observation_token_counter=len,
-        )
-        raw = (
-            "Description " + "x" * 200
-            + "\n\n搜索功能是否可用: False"
-            + '\n\n可点击的按钮: ["back to search", "< prev"]'
-        )
-
-        visible, meta = client.project_observation("view_description", raw, {})
-
-        self.assertLessEqual(len(visible), 128)
-        self.assertTrue(meta["truncated"])
-        self.assertTrue(meta["critical_footer_preserved"])
 
     def test_openai_client_thinking_mode_keeps_reasoning_for_tool_follow_up(self):
         captured = {}

@@ -84,6 +84,35 @@ class StructuredObservationTest(unittest.TestCase):
                 with self.assertRaisesRegex(StructuredObservationError, "invalid"):
                     render_structured_observation(state)
 
+    def test_search_values_cannot_shift_price_or_attribute_columns(self):
+        state = search_state(1)
+        product = state["products"][0]
+        product.update({"brand": "A|B", "category": "杯|壶", "key_attributes": ["容量|500ml"], "title": "保温|杯"})
+        row = next(line for line in render_structured_observation(state).splitlines() if line.startswith("1|"))
+        self.assertEqual(row.split("|"), ["1", product["asin"], "1", "A｜B", "杯｜壶", "容量｜500ml", "保温｜杯"])
+
+    def test_zero_price_is_not_rendered_as_missing(self):
+        state = search_state(1)
+        state["products"][0]["price"] = 0
+        row = next(line for line in render_structured_observation(state).splitlines() if line.startswith("1|"))
+        self.assertEqual(row.split("|")[2], "0")
+
+    def test_information_subpage_list_content_is_readable_text(self):
+        state = {
+            "observation_version": "shopping-observation-v2",
+            "page_type": "information_subpage",
+            "search_available": False,
+            "actions": ["< prev"],
+            "product": {"asin": "12345678", "price": 0},
+            "subpage": "features",
+            "content": [" 保温12小时 ", "", "可机洗"],
+        }
+        observation = render_structured_observation(state)
+        self.assertIn("content: 保温12小时; 可机洗", observation.splitlines())
+        self.assertIn("price: 0", observation.splitlines())
+        self.assertIsNone(action_reject_reason("prev_page", {}, observation))
+        self.assertIsNotNone(action_reject_reason("select_option", {"value": "500ml"}, observation))
+
 
 if __name__ == "__main__":
     unittest.main()

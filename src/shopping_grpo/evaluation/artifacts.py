@@ -33,17 +33,6 @@ def iter_jsonl(path: str | Path) -> Iterator[dict]:
             yield row
 
 
-def load_json(path: str | Path) -> dict:
-    source = Path(path)
-    try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ArtifactError(f"{source}: invalid JSON") from exc
-    if not isinstance(payload, dict):
-        raise ArtifactError(f"{source}: JSON root must be an object")
-    return payload
-
-
 def index_jsonl(
     path: str | Path,
     *,

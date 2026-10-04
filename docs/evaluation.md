@@ -6,7 +6,7 @@
 不生成 Rubric、不调用 Flash Curator/Judge，也不要求 Flash API 凭据：
 
 ```bash
-bash scripts/evaluate.sh sft
+bash scripts/evaluate.sh baseline
 ```
 
 `LLM_BASE_URL / LLM_API_KEY / SERVED_MODEL_NAME` 只配置 Actor，默认指向本地 vLLM。
@@ -36,7 +36,14 @@ Final-200 Clean 替换了 81 道不可严格评分或 Query/Gold 冲突的题；
 每题一次确定性 rollout：temperature/top-p `0/1`、最多 35 环境步、每回合 512 tokens、
 context 24,576，关闭 compaction。缺失、基础设施失败和 `not_judged` 都保留在 200 题分母。
 严格成功要求完整 `gold_purchase` 终局且 `reward_valid=true`。
+报告区分完整任务数、已记录轨迹和缺失任务；成功率及共识统计始终使用完整任务集合。
+Reward/步数分布只统计已记录轨迹，不给缺失题补零。终局图覆盖全部 Reward v3 类型，缺失单列。
 不使用盲测集调 Prompt、校准 Judge 或选 checkpoint。
+
+Observation v2 的搜索页和详情/信息子页默认预算均为 4,096 tokens；其他页面为 768。
+投影只裁标题和子页正文，完整保留价格、品牌、类目、关键属性、已选/可选规格和动作 footer；
+关键字段超预算时停止该轨迹，不改写价格或丢弃当前页商品。GRPO 增量工具消息不再套用初始 prompt 的左截断。
+这是新的模型输入协议；旧评估产物不回写，新旧结果不能直接归因于模型收益。
 
 ## Rubric 与 Judge 契约
 
@@ -60,12 +67,17 @@ outputs/evaluation/NAME/judge/{preprocessed,judge_requests,judges,evaluations}.j
 outputs/evaluation/NAME/judge/evaluation_summary.json
 ```
 
-默认仅生成 `trajectories.jsonl`、`summary.json`、`report.html`；共享资产和 `judge/`
+默认生成 `trajectories.jsonl`、`summary.json`、`report.html`；共享资产和 `judge/`
 仅在 `EVAL_RUBRIC_JUDGE=1` 时生成或复用。`EVAL_RESUME / EVAL_FORCE` 不会隐式开启评审。
 
+Actor 每次评估只创建新轨迹文件；已有 `trajectories.jsonl` 直接拒绝，不覆盖、不隐式续跑。
+重跑使用新评测标签或 `EVAL_OUTPUT_DIR`。中断仍写出固定分母的 summary，可单独生成报告。
+报告要求当前 summary 的 `expected_task_ids`，不兼容旧 schema、不回写旧产物。
+GRPO 初始化/取消会等待 reset/release 线程完成后归还租约。响应丢失且未收到 `env_idx` 或进程被强杀时，现有 API 无法由客户端保证回收。
+
 共享 Rubric 每次校验缓存并只补缺失任务，不重复调用已完成的 Curator。
-`EVAL_RESUME=1` 补缺失 Judge 结果；输入变更则拒绝旧缓存。
-`EVAL_FORCE=1` 重跑当前模型 Judge，不覆盖跨 Actor 的冻结 Rubric。
+`EVAL_RUBRIC_JUDGE=1` 配合 `EVAL_RESUME=1 / EVAL_FORCE=1` 跳过 Actor，分别补缺或重跑已有轨迹的 Judge。
+输入变更拒绝旧 Judge 缓存；两者均不覆盖跨 Actor 的冻结 Rubric。
 修改数据、extractor 或 Prompt 后使用新 `EVAL_SHARED_DIR` 并重新评估所有 Actor，不能混用标准。
 
 单独运行 `scripts/eval_rubric_judge.py` 默认拒绝盲测 task ID；正式处理须显式传 `--allow-blind-final`。

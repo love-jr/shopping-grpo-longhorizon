@@ -21,7 +21,7 @@ class StructuredObservationError(ValueError):
 
 
 def _text(value):
-    return re.sub(r"\s+", " ", str(value or "")).strip()
+    return re.sub(r"\s+", " ", str(value if value is not None else "")).strip()
 
 
 def _list(value):
@@ -63,7 +63,8 @@ def render_structured_observation(state: Mapping) -> str:
         lines.extend(_render_product(state))
         if page_type == "information_subpage":
             lines.append(f"subpage: {_text(state.get('subpage'))}")
-            lines.append("content: " + _text(state.get("content")))
+            content = state.get("content")
+            lines.append("content: " + ("; ".join(_list(content)) if isinstance(content, list) else _text(content)))
     elif page_type != "terminal":
         raise StructuredObservationError(f"unsupported page_type: {page_type!r}")
     return "\n".join(lines) + "\n\n" + "\n".join(_footer(state))
@@ -99,11 +100,11 @@ def _render_search_results(state):
                 (
                     str(int(product.get("rank", 0))),
                     asin,
-                    _text(product.get("price")),
-                    _text(product.get("brand")),
-                    _text(product.get("category")),
-                    attributes,
-                    _text(product.get("title")),
+                    _text(product.get("price")).replace("|", "｜"),
+                    _text(product.get("brand")).replace("|", "｜"),
+                    _text(product.get("category")).replace("|", "｜"),
+                    attributes.replace("|", "｜"),
+                    _text(product.get("title")).replace("|", "｜"),
                 )
             )
         )

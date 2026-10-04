@@ -1,11 +1,7 @@
 import unittest
-import json
-from pathlib import Path
-import tempfile
 
 from shopping_grpo.environment.manifest import (
     MANIFEST_VERSION,
-    shopsimulator_source_commit,
     validate_manifest,
 )
 
@@ -29,7 +25,7 @@ class EnvironmentManifestTest(unittest.TestCase):
         }
         self.assertIs(validate_manifest(manifest), manifest)
 
-    def test_page_size_mismatch_is_rejected(self):
+    def test_missing_required_fields_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "missing"):
             validate_manifest({})
 
@@ -49,7 +45,6 @@ class EnvironmentManifestTest(unittest.TestCase):
             "max_steps": 35,
             "seed": 20260726,
         }
-        self.assertIs(validate_manifest(manifest), manifest)
         manifest["reward"] = {"version": "unsupported-reward"}
         with self.assertRaisesRegex(ValueError, "requires shopsimulator-reward-v3"):
             validate_manifest(manifest)
@@ -71,15 +66,6 @@ class EnvironmentManifestTest(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "Tool v2"):
             validate_manifest(manifest)
-
-    def test_embedded_shopsimulator_commit_is_read_without_nested_git(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "EMBEDDED_SOURCE.json").write_text(
-                json.dumps({"source_commit": "e" * 40}),
-                encoding="utf-8",
-            )
-            self.assertEqual(shopsimulator_source_commit(root), "e" * 40)
 
 
 if __name__ == "__main__":

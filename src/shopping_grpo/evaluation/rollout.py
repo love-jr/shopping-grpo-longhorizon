@@ -5,7 +5,6 @@
 """
 
 import json
-import os
 import time
 import traceback
 from datetime import datetime, timezone
@@ -210,13 +209,12 @@ class OpenAIChatClient:
                     raise
                 time.sleep(MODEL_RETRY_DELAY_SECONDS * (attempt + 1))
 
-    def project_observation(self, tool_name, observation, parameters=None):
+    def project_observation(self, tool_name, observation):
         if self.observation_token_budget is None:
             return str(observation), None
         visible, meta = project_observation(
             tool_name=tool_name,
             observation=observation,
-            parameters=parameters,
             count_tokens=self.observation_token_counter,
             token_budget=self.observation_token_budget,
             detail_token_budget=self.observation_detail_token_budget,
@@ -385,24 +383,24 @@ def collect_for_task(
             messages.append(assistant)
             # 只有通过当前 observation 守卫的调用才会触碰环境并消耗一个执行步骤。
             step = _execute_tool_call(env, tool_call, len(trajectory["steps"]))
+            trajectory["steps"].append(step)
             raw_observation = step["observation"]
             projector = getattr(client, "project_observation", None)
-            if projector is not None:
+            if projector is not None and step["env_action"] is not None and not step["done"]:
                 visible_observation, projection = projector(
                     step["tool_name"],
                     raw_observation,
-                    step["parameters"],
                 )
                 if projection is not None:
                     step["raw_observation"] = raw_observation
                     step["observation"] = visible_observation
                     step["projection"] = projection
-            trajectory["steps"].append(step)
             consecutive_blocked_calls = 0
-            latest_observation = step["observation"]
-            latest_observation_truncated = bool(
-                (step.get("projection") or {}).get("truncated")
-            )
+            if step["env_action"] is not None:
+                latest_observation = step["observation"]
+                latest_observation_truncated = bool(
+                    (step.get("projection") or {}).get("truncated")
+                )
             messages.append(_tool_message(tool_call, step))
             if step["done"]:
                 trajectory["status"] = "done"
@@ -523,7 +521,9 @@ def _execute_tool_call(env, tool_call, step_index):
         except Exception as exc:
             step["error"] = {"type": exc.__class__.__name__, "message": str(exc)}
             raise ToolExecutionError(step, exc) from exc
-    if result.get("observation_state") is not None:
+    if result.get("done"):
+        observation = "Environment terminated."
+    elif result.get("observation_state") is not None:
         observation = render_structured_observation(result["observation_state"])
     else:
         observation = result.get("instruction", result.get("observation", ""))
@@ -685,44 +685,3 @@ def _plain(value):
     if hasattr(value, "__dict__"):
         return {k: _plain(v) for k, v in value.__dict__.items() if not k.startswith("_")}
     return value
-
-
-def client_from_env(
-    model=None,
-    base_url=None,
-    api_key=None,
-    temperature=0.0,
-    top_p=1.0,
-    timeout=60,
-    max_tokens=512,
-    thinking=False,
-    reasoning_effort="high",
-    context_window=None,
-    context_safety_margin=512,
-    context_compaction_enable=False,
-    observation_token_budget=None,
-    observation_detail_token_budget=4096,
-    observation_generic_token_budget=768,
-    observation_search_top_k=20,
-):
-    api_key = api_key or os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("api_key or OPENAI_API_KEY is required")
-    return OpenAIChatClient(
-        model=model or os.environ.get("OPENAI_MODEL", "deepseek-chat"),
-        base_url=base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        api_key=api_key,
-        temperature=temperature,
-        top_p=top_p,
-        timeout=timeout,
-        max_tokens=max_tokens,
-        thinking=thinking,
-        reasoning_effort=reasoning_effort,
-        context_window=context_window,
-        context_safety_margin=context_safety_margin,
-        context_compaction_enable=context_compaction_enable,
-        observation_token_budget=observation_token_budget,
-        observation_detail_token_budget=observation_detail_token_budget,
-        observation_generic_token_budget=observation_generic_token_budget,
-        observation_search_top_k=observation_search_top_k,
-    )

@@ -101,6 +101,7 @@ def summarize_trajectories(expected_task_ids, trajectories):
     denominator = len(expected_ids)
     return {
         "expected_tasks": denominator,
+        "expected_task_ids": sorted(expected_set),
         "completed_tasks": len(completed_ids),
         "missing_tasks": missing_ids,
         "done_tasks": len(done_tasks),

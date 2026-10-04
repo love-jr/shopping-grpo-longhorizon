@@ -1,37 +1,23 @@
-"""在不丢失动作目标的前提下压缩模型可见 observation。
-
-长商品标题和详情会占用上下文，但搜索结果中的 ASIN、页面导航和 footer 不能被
-截掉。投影器因此先按页面类型选择预算，再压缩正文，最后验证所有可操作目标仍
-与原始 observation 一致。
-"""
+"""按 token 预算裁剪 observation v2 的标题/正文，保留完整决策字段和动作 footer。"""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import json
 import re
 
 from shopping_grpo.environment.actions import clickable_buttons, product_ids
-from shopping_grpo.environment.product_id import PRODUCT_ID_CAPTURE, is_product_id
+from shopping_grpo.environment.observation import HEADER
+from shopping_grpo.environment.product_id import PRODUCT_ID_CAPTURE
 
 
-FOOTER_MARKER = "\n\n搜索功能是否可用:"
 TRUNCATION_MARKER = "[TRUNCATED_BY_SHOPPING_PROJECTOR]"
-PROJECTION_CONTRACT_VERSION = "shopping-observation-v2"
-NAVIGATION_BUTTONS = {
-    "back to search",
-    "next >",
-    "< prev",
-    "description",
-    "features",
-    "reviews",
-    "attributes",
-    "buy now",
-}
+FOOTER_PATTERN = re.compile(
+    r"\n\n搜索功能是否可用: (True|False)\n可点击的按钮: (\[[^\n]*\])\Z"
+)
 
 
 class ObservationProjectionError(RuntimeError):
-    """A safe model-visible observation cannot be produced."""
+    """The complete decision fields and actionable state cannot fit the budget."""
 
 
 @dataclass(frozen=True)
@@ -58,13 +44,12 @@ def project_observation(
     observation,
     *,
     count_tokens,
-    token_budget=1536,
+    token_budget=4096,
     detail_token_budget=4096,
     generic_token_budget=768,
-    parameters=None,
     search_top_k=20,
 ):
-    """返回有 token 上限的 observation，并保证可见目标与动作守卫目标一致。"""
+    """只裁标题和信息子页正文；关键字段装不下时停止，而不是改写价格/规格。"""
     observation = str(observation)
     token_budget = int(token_budget)
     detail_token_budget = int(detail_token_budget)
@@ -75,66 +60,81 @@ def project_observation(
     if search_top_k < 1:
         raise ValueError("search_top_k must be positive")
 
-    raw_tokens = int(count_tokens(observation))
-    raw_buttons = clickable_buttons(observation)
-    raw_asins = product_ids(observation)
-    page_type = _page_type(observation)
+    lines = observation.splitlines()
+    page_type = (
+        lines[1].removeprefix("page_type: ")
+        if len(lines) > 1 and lines[0] == HEADER and lines[1].startswith("page_type: ")
+        else "generic"
+    )
     effective_budget = {
         "search_results": token_budget,
         "product_detail": detail_token_budget,
+        "information_subpage": detail_token_budget,
     }.get(page_type, generic_token_budget)
-    # 短 observation 原样保留；只有超预算时才压缩，避免不必要地改变模型输入。
-    if raw_tokens <= effective_budget:
-        visible = observation
-    else:
-        _require_action_footer(observation)
-        if page_type == "search_results":
-            visible = _project_search_results(
-                observation,
-                parameters=parameters or {},
-                count_tokens=count_tokens,
-                token_budget=effective_budget,
-                search_top_k=search_top_k,
-            )
-        else:
-            visible = _project_generic_page(
-                observation,
-                count_tokens=count_tokens,
-                token_budget=effective_budget,
-            )
+    raw_buttons = clickable_buttons(observation)
+    raw_asins = product_ids(observation)
+    if page_type == "search_results" and len(raw_asins) > search_top_k:
+        raise ObservationProjectionError("search page exceeds configured page capacity")
 
-    # 压缩完成后再次验证：预算、footer、ASIN 和按钮都必须满足安全契约。
+    raw_tokens = int(count_tokens(observation))
+    visible = observation
+    if raw_tokens > effective_budget:
+        footer = FOOTER_PATTERN.search(observation)
+        if footer is None:
+            raise ObservationProjectionError("long observation has no complete action footer")
+        if not lines or lines[0] != HEADER:
+            raise ObservationProjectionError("projection requires observation v2")
+        body_lines = observation[:footer.start()].splitlines()
+        flexible = {}
+        for index, line in enumerate(body_lines):
+            if page_type == "search_results" and re.match(
+                rf"^\d+\|{PRODUCT_ID_CAPTURE}\|", line
+            ):
+                fields = line.split("|", 6)
+                if len(fields) != 7:
+                    raise ObservationProjectionError("malformed search product row")
+                flexible[index] = ("|".join(fields[:6]) + "|", fields[6])
+            elif page_type in {"product_detail", "information_subpage"} and line.startswith(
+                ("title: ", "content: ")
+            ):
+                prefix, text = line.split(": ", 1)
+                flexible[index] = (prefix + ": ", text)
+
+        def render(character_limit):
+            projected = list(body_lines)
+            for index, (prefix, text) in flexible.items():
+                projected[index] = prefix + _compact_text(text, character_limit)
+            return "\n".join([*projected, TRUNCATION_MARKER]) + footer.group(0)
+
+        # 空标题/正文是硬字段的下界；下界超预算时绝不能把价格也裁掉。
+        visible = render(0)
+        if int(count_tokens(visible)) > effective_budget:
+            raise ObservationProjectionError(
+                "complete decision fields and action footer exceed observation token budget"
+            )
+        low, high = 1, max((len(text) for _, text in flexible.values()), default=0)
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = render(middle)
+            if int(count_tokens(candidate)) <= effective_budget:
+                visible = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+
     visible_tokens = int(count_tokens(visible))
-    if visible_tokens > effective_budget:
-        raise ObservationProjectionError(
-            f"visible observation uses {visible_tokens} tokens, above budget {effective_budget}"
-        )
     visible_buttons = clickable_buttons(visible)
     visible_asins = product_ids(visible)
-    footer_preserved = _critical_footer_preserved(
-        observation,
-        visible,
-        raw_buttons=raw_buttons,
-        visible_buttons=visible_buttons,
-    )
-    if not footer_preserved:
-        raise ObservationProjectionError("critical search/button footer was not preserved")
-    if page_type != "search_results" and set(visible_buttons) != set(raw_buttons):
-        raise ObservationProjectionError("non-search projection changed actionable buttons")
-    if page_type == "search_results":
-        if set(raw_asins) != set(visible_asins):
-            raise ObservationProjectionError(
-                "search projection must preserve every product on the current environment page"
-            )
-        visible_product_targets = {
-            button for button in visible_buttons if is_product_id(button)
-        }
-        if set(raw_asins) != visible_product_targets:
-            raise ObservationProjectionError(
-                "all current-page search products must remain visible and actionable"
-            )
+    if visible_tokens > effective_budget:
+        raise ObservationProjectionError("projected observation exceeds token budget")
+    if visible_buttons != raw_buttons or visible_asins != raw_asins:
+        raise ObservationProjectionError("projection changed actionable targets")
+    if page_type == "search_results" and set(raw_asins) != {
+        button for button in raw_buttons if re.fullmatch(PRODUCT_ID_CAPTURE, button)
+    }:
+        raise ObservationProjectionError("search products differ from actionable targets")
 
-    meta = ObservationProjectionMeta(
+    return visible, ObservationProjectionMeta(
         tool_name=str(tool_name),
         page_type=page_type,
         token_budget=effective_budget,
@@ -146,275 +146,17 @@ def project_observation(
         visible_asin_count=len(visible_asins),
         raw_button_count=len(raw_buttons),
         visible_button_count=len(visible_buttons),
-        critical_footer_preserved=footer_preserved,
-    )
-    return visible, meta
-
-
-def _page_type(observation):
-    if (
-        "[SHOPPING_OBSERVATION_V2]" in observation
-        and "page_type: search_results" in observation
-    ):
-        return "search_results"
-    if re.search(r"(?:^|\[SEP\]\s*)Page \d+", observation) and product_ids(observation):
-        return "search_results"
-    buttons = {button.casefold() for button in clickable_buttons(observation)}
-    if "buy now" in buttons or "价格:" in observation:
-        return "product_detail"
-    if "搜索功能是否可用: True" in observation:
-        return "search_home"
-    if buttons and buttons <= {"back to search", "< prev"}:
-        return "information_subpage"
-    return "generic"
-
-
-def _project_search_results(
-    observation,
-    *,
-    parameters,
-    count_tokens,
-    token_budget,
-    search_top_k,
-):
-    """压缩搜索结果标题，但保留当前页的每一个候选 ASIN。"""
-    if "[SHOPPING_OBSERVATION_V2]" in observation:
-        return _project_structured_search_results(
-            observation,
-            count_tokens=count_tokens,
-            token_budget=token_budget,
-        )
-    body, footer = _split_footer(observation)
-    segments = [segment.strip() for segment in body.split("[SEP]")]
-    page = next((segment for segment in segments if re.fullmatch(r"Page \d+.*", segment)), "Page unknown")
-    products = []
-    for index, segment in enumerate(segments):
-        if not is_product_id(segment):
-            continue
-        title = segments[index + 1] if index + 1 < len(segments) else ""
-        price = segments[index + 2] if index + 2 < len(segments) else ""
-        products.append((segment, title, price))
-    if not products:
-        return _project_generic_page(
-            observation,
-            count_tokens=count_tokens,
-            token_budget=token_budget,
-        )
-    if len(products) > search_top_k:
-        raise ObservationProjectionError(
-            f"raw search page has {len(products)} products, above configured "
-            f"page capacity {search_top_k}"
-        )
-
-    query = str(parameters.get("query", "")).strip()
-    raw_buttons = clickable_buttons(observation)
-    selected_asins = {asin for asin, _, _ in products}
-
-    def render(title_character_limit):
-        compacted_titles = [
-            _compact_title(title, title_character_limit) for _, title, _ in products
-        ]
-        titles_compacted = any(
-            compacted != title
-            for compacted, (_, title, _) in zip(compacted_titles, products, strict=True)
-        )
-        visible_buttons = [
-            button for button in raw_buttons
-            if button.casefold() in NAVIGATION_BUTTONS or button in selected_asins
-        ]
-        lines = [
-            "[SHOPPING_OBSERVATION_PROJECTION]",
-            "page_type: search_results",
-            f"query: {query or '(not recorded)'}",
-            f"page: {page}",
-            f"products_shown: {len(products)}/{len(products)}",
-        ]
-        lines.extend(
-            f"{position:02d}|{asin}|{price}|{title}"
-            for position, ((asin, _, price), title) in enumerate(
-                zip(products, compacted_titles, strict=True),
-                start=1,
-            )
-        )
-        if titles_compacted:
-            lines.append(f"{TRUNCATION_MARKER} product_titles_compacted=true")
-        lines.extend(_footer_lines(footer, visible_buttons))
-        return "\n".join(lines)
-
-    maximum_title_characters = max((len(title) for _, title, _ in products), default=0)
-    # 用二分搜索找到预算内最长标题，尽量保留信息而不引入复杂的排序策略。
-    low, high, best = 0, maximum_title_characters, None
-    while low <= high:
-        middle = (low + high) // 2
-        candidate = render(middle)
-        if int(count_tokens(candidate)) <= token_budget:
-            best = candidate
-            low = middle + 1
-        else:
-            high = middle - 1
-    if best is not None:
-        return best
-    raise ObservationProjectionError(
-        "all current-page search products cannot fit the observation token budget, "
-        "even with empty title snippets"
+        critical_footer_preserved=True,
     )
 
 
-def _project_structured_search_results(
-    observation,
-    *,
-    count_tokens,
-    token_budget,
-):
-    body, footer = _split_footer(observation)
-    lines = body.splitlines()
-    product_lines = []
-    header_lines = []
-    for line in lines:
-        match = re.fullmatch(rf"(\d+)\|({PRODUCT_ID_CAPTURE})\|(.*)", line)
-        if match:
-            product_lines.append((match.group(1), match.group(2), match.group(3)))
-        elif line and not line.startswith("products_shown:"):
-            header_lines.append(line)
-    if not product_lines:
-        raise ObservationProjectionError(
-            "structured search observation has no product rows"
-        )
-    raw_buttons = clickable_buttons(observation)
-    product_asins = {asin for _, asin, _ in product_lines}
-    visible_buttons = [
-        button
-        for button in raw_buttons
-        if button in product_asins or button.casefold() in NAVIGATION_BUTTONS
-    ]
-
-    def render(character_limit):
-        compacted = []
-        truncated = False
-        for rank, asin, payload in product_lines:
-            fields = payload.split("|")
-            compacted_fields = [
-                _compact_title(field, character_limit) for field in fields
-            ]
-            truncated = truncated or compacted_fields != fields
-            compacted.append("|".join((rank, asin, *compacted_fields)))
-        rendered = [*header_lines, *compacted]
-        if truncated:
-            rendered.append(f"{TRUNCATION_MARKER} product_fields_compacted=true")
-        rendered.extend(_footer_lines(footer, visible_buttons))
-        return "\n".join(rendered)
-
-    maximum = max(
-        (len(field) for _, _, payload in product_lines for field in payload.split("|")),
-        default=0,
-    )
-    low, high, best = 0, maximum, None
-    while low <= high:
-        middle = (low + high) // 2
-        candidate = render(middle)
-        if int(count_tokens(candidate)) <= token_budget:
-            best = candidate
-            low = middle + 1
-        else:
-            high = middle - 1
-    if best is None:
-        raise ObservationProjectionError(
-            "all structured current-page products cannot fit the observation token budget"
-        )
-    return best
-
-
-def _compact_title(title, character_limit):
-    title = str(title)
-    character_limit = int(character_limit)
+def _compact_text(text, character_limit):
+    if len(text) <= character_limit:
+        return text
     if character_limit <= 0:
         return ""
-    if len(title) <= character_limit:
-        return title
     if character_limit == 1:
         return "…"
-    if character_limit == 2:
-        return title[0] + "…"
-    head_length = max(1, (character_limit - 1) * 2 // 3)
-    tail_length = max(1, character_limit - 1 - head_length)
-    return title[:head_length] + "…" + title[-tail_length:]
-
-
-def _project_generic_page(observation, *, count_tokens, token_budget):
-    """压缩详情/子页正文，同时完整保留动作 footer。"""
-    body, footer = _split_footer(observation)
-    footer_lines = _footer_lines(footer, clickable_buttons(observation))
-    suffix = "\n".join([TRUNCATION_MARKER, *footer_lines])
-    if int(count_tokens(suffix)) > token_budget:
-        raise ObservationProjectionError("critical footer exceeds the observation token budget")
-
-    # Keep both ends of the page body: titles/key attributes are usually near the
-    # front, while selected options and navigation context may be appended near
-    # the end. The complete actionable footer is always preserved separately.
-    low, high, best = 0, len(body), ""
-    while low <= high:
-        middle = (low + high) // 2
-        tail_length = min(middle // 5, len(body))
-        head_length = middle - tail_length
-        if tail_length:
-            projected_body = (
-                body[:head_length].rstrip()
-                + "\n"
-                + TRUNCATION_MARKER
-                + "\n"
-                + body[-tail_length:].lstrip()
-            )
-            candidate = projected_body + "\n" + "\n".join(footer_lines)
-        else:
-            candidate = suffix
-        if int(count_tokens(candidate)) <= token_budget:
-            best = candidate
-            low = middle + 1
-        else:
-            high = middle - 1
-    if not best:
-        raise ObservationProjectionError("unable to fit generic observation into token budget")
-    return best
-
-
-def _split_footer(observation):
-    index = observation.rfind(FOOTER_MARKER)
-    if index < 0:
-        return observation, ""
-    return observation[:index], observation[index + 2 :]
-
-
-def _require_action_footer(observation):
-    if FOOTER_MARKER not in observation or "可点击的按钮:" not in observation:
-        raise ObservationProjectionError(
-            "long observation has no complete action footer and cannot be projected safely"
-        )
-
-
-def _footer_lines(footer, buttons):
-    search_state = next(
-        (
-            line.strip()
-            for line in footer.splitlines()
-            if line.strip().startswith("搜索功能是否可用:")
-        ),
-        "搜索功能是否可用: False",
-    )
-    return [
-        search_state,
-        "可点击的按钮: " + json.dumps(buttons, ensure_ascii=False),
-    ]
-
-
-def _critical_footer_preserved(raw, visible, *, raw_buttons, visible_buttons):
-    if "搜索功能是否可用:" in raw and "搜索功能是否可用:" not in visible:
-        return False
-    if "可点击的按钮:" in raw and "可点击的按钮:" not in visible:
-        return False
-    raw_navigation = {
-        button.casefold() for button in raw_buttons if button.casefold() in NAVIGATION_BUTTONS
-    }
-    visible_navigation = {
-        button.casefold() for button in visible_buttons if button.casefold() in NAVIGATION_BUTTONS
-    }
-    return raw_navigation == visible_navigation
+    head = (character_limit - 1) * 2 // 3
+    tail = character_limit - 1 - head
+    return text[:head] + "…" + (text[-tail:] if tail else "")

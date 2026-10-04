@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 
 
 MANIFEST_VERSION = "shopping-environment-manifest-v1"
-EMBEDDED_SOURCE_FILE = "EMBEDDED_SOURCE.json"
 REQUIRED_KEYS = {
     "manifest_version",
     "shopsimulator_commit",
@@ -28,25 +26,6 @@ def sha256_file(path):
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
-
-
-def shopsimulator_source_commit(repository):
-    repository = Path(repository)
-    embedded_source = repository / EMBEDDED_SOURCE_FILE
-    if not embedded_source.is_file():
-        raise ValueError(f"missing embedded source metadata: {embedded_source}")
-    try:
-        metadata = json.loads(embedded_source.read_text(encoding="utf-8"))
-        commit = metadata["source_commit"]
-    except (OSError, KeyError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid embedded ShopSimulator source metadata: {exc}") from exc
-    if (
-        not isinstance(commit, str)
-        or len(commit) != 40
-        or any(character not in "0123456789abcdef" for character in commit)
-    ):
-        raise ValueError("embedded ShopSimulator commit is not a lowercase Git SHA")
-    return commit
 
 
 def validate_manifest(manifest):
