@@ -9,14 +9,14 @@
 <br />
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
-[![LoRA SFT](https://img.shields.io/badge/Post--training-LoRA%20SFT-7B61FF)](docs/sft.md)
+[![LoRA SFT](https://img.shields.io/badge/Post--training-LoRA%20SFT-7B61FF)](docs/training.md)
 [![veRL](https://img.shields.io/badge/veRL-0.8.0-0E8A16)](https://github.com/verl-project/verl)
 [![ShopSimulator](https://img.shields.io/badge/Environment-ShopSimulator%20v2.1-4C78A8)](https://arxiv.org/pdf/2601.18225)
 [![Benchmark](https://img.shields.io/badge/Benchmark-Final--200--Clean-F59E0B)](docs/evaluation.md#固定-benchmark)
 
 <br />
 
-教师轨迹与 LoRA SFT → veRL 在线 GRPO → Final-200 Clean Benchmark 的可审计对比
+教师轨迹与 LoRA SFT → veRL GRPO / OPSD → Final-200 Clean Benchmark 的可审计对比
 
 </div>
 
@@ -53,18 +53,22 @@ flowchart LR
     B --> C[Action-only SFT 数据]
     C --> D[LoRA SFT]
     D --> E[veRL 在线 GRPO]
+    D --> E2[veRL OPSD]
     F[ShopSimulator v2.1] --> E
+    F --> E2
     G[Final-200 Clean 测试任务] --> H[统一评估流水线]
     I[Base Model] --> H
     D --> H
     E --> H
+    E2 --> H
 ```
 
 | 阶段 | 目标 | 入口 | 详细文档 |
 |---|---|---|---|
 | Baseline | 测量原始 Qwen3.5-2B 的工具使用能力 | `bash scripts/baseline.sh` | [评估](docs/evaluation.md) |
-| SFT | 从高质量教师轨迹学习合法、完整的购物行为 | `bash scripts/sft.sh` | [SFT](docs/sft.md) |
-| GRPO | 在真实环境 Rollout 中优化 Reward v3 | `bash scripts/grpo.sh` | [训练](docs/sft.md#grpo) |
+| SFT | 从高质量教师轨迹学习合法、完整的购物行为 | `bash scripts/sft.sh` | [SFT](docs/training.md#sft) |
+| GRPO | 在真实环境 Rollout 中优化 Reward v3 | `bash scripts/grpo.sh` | [训练](docs/training.md#grpo) |
+| OPSD | 私有商品参考指导冻结教师，对学生动作逐 token 自蒸馏，不使用任务奖励 | `bash scripts/opsd.sh` | [OPSD](docs/training.md#opsd) |
 | Evaluation | 使用同一批 Final-200 Clean 留出任务公平比较模型 | `bash scripts/evaluate.sh NAME` | [评估](docs/evaluation.md) |
 
 ### SFT 数据是怎么收集的？
@@ -90,7 +94,7 @@ python scripts/collect_sft_data.py \
 
 SFT 只在 Assistant 动作 token 上计算 Loss，用户指令和环境 Observation 会被
 Mask。这样模型学习的是可执行的工具策略，而不是背诵环境返回内容。数据哈希、接受率
-和采集审计见[采集与训练指南](docs/sft.md)。
+和采集审计见[采集与训练指南](docs/training.md)。
 
 ### GRPO 是怎么训练的？
 
@@ -100,7 +104,7 @@ GRPO 从合并后的 SFT 模型开始。veRL 在 ShopSimulator 中为每个 Prom
 
 本仓库没有复制 veRL 源码，而是固定安装 `verl==0.8.0`，并保留项目自己的
 AgentLoop、工具适配层、运行时兼容代码和一个带 SHA-256 校验的小补丁。详细配置见
-[采集与训练指南](docs/sft.md)。
+[采集与训练指南](docs/training.md)。
 
 ### 评估流水线是怎么设计的？
 
@@ -148,16 +152,18 @@ Prompt、输入隔离、产物与 Final-200 Clean 筛选口径见
 
 ## 实验结果
 
-下表为 Final-200 Clean 的 200 题 rollout 结果；GRPO 使用已验证加载的 LoRA adapter。
+下表为 Final-200 Clean 的 200 题 rollout 结果；GRPO、OPSD 使用已验证加载的 LoRA adapter。
 
 | 模型 | 严格成功率 | 购买成功率 | 完成终局率 | 平均 Reward | 平均步数 |
 |---|---:|---:|---:|---:|---:|
 | Qwen3.5-2B Baseline | 0.50% | 0.50% | 24.0% | -0.1362 | 6.43 |
 | LoRA SFT | 62.50% | 62.50% | 99.5% | 0.4979 | 8.86 |
-| GRPO step 100（LoRA） | 62.50% | 62.50% | 99.5% | 0.5088 | 9.03 |
-| GRPO step 500（LoRA） | 69.50% | 69.50% | 98.0% | 0.6136 | 9.45 |
+| GRPO step 100 | 62.50% | 62.50% | 99.5% | 0.5088 | 9.03 |
+| GRPO step 500 | 69.50% | 69.50% | 98.0% | 0.6136 | 9.45 |
+| OPSD step 200 | 69.00% | 69.00% | 98.0% | 0.5961 | 8.04 |
 
 结果摘要位于 `outputs/evaluation/{baseline,sft,grpo-step100-lora-final200,grpo-step500-lora-final200}/summary.json`。
+OPSD 当前版本结果位于 `outputs/evaluation/opsd-b8-v3-retry2-step200-rerun/summary.json`（138/200）。
 
 ## 训练硬件与耗时
 
@@ -314,6 +320,18 @@ bash scripts/report_all.sh
 
 Checkpoint、Rollout 和日志统一写入 Git 忽略的 `outputs/`。
 
+### 6. 训练 OPSD
+
+学生自行 rollout，冻结教师额外读取商品参考，逐 token 蒸馏，不使用任务奖励。
+使用全部 1,000 个训练任务；actor、teacher 各一张 GPU，启动前停止评测服务。
+
+```bash
+bash scripts/opsd.sh -- \
+  data.train_batch_size=8 trainer.total_training_steps=200 trainer.save_freq=50
+```
+
+参考设计与运行细节见[OPSD 文档](docs/training.md#opsd)。
+
 ## Reward v3 简介
 
 Reward v3 是一个确定性的终局 Reward，不依赖另一个大模型进行主观判断：
@@ -382,7 +400,7 @@ bash scripts/grpo.sh --logger swanlab
 
 ## 文档导航
 
-- [数据采集、SFT 与 GRPO](docs/sft.md)
+- [数据采集、SFT、GRPO 与 OPSD](docs/training.md)
 - [Final-200 Clean 评估](docs/evaluation.md)
 - [Reward v3](docs/reward-v3.md)
 

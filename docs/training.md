@@ -1,7 +1,7 @@
-# 数据采集、SFT 与 GRPO
+# 数据采集、SFT、GRPO 与 OPSD
 
-正式路径：Baseline → SFT → GRPO → Evaluation。安装和服务启动见
-[README](../README.md#快速开始)；只维护这一条默认训练路径。
+项目流程：Baseline → SFT → GRPO → OPSD → Evaluation。GRPO 与 OPSD 分别从
+SFT 权重训练并统一评测。安装和服务启动见[README](../README.md#快速开始)。
 
 ## 数据采集
 
@@ -69,4 +69,27 @@ bash scripts/export_grpo.sh \
 `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1`；小 `/dev/shm` 容器使用
 `data.dataloader_num_workers=0`。诊断写入运行目录的 `training_diagnostics.jsonl`。
 
-导出后按[评估指南](evaluation.md)评估；checkpoint 选择只使用验证集，不使用 Final-200 Clean。
+## OPSD
+
+学生自行 rollout；冻结教师从同一份 SFT 权重加载，额外读取私有商品参考，
+对学生动作 token 提供 k1 蒸馏信号。`use_task_rewards=false`，不优化购物奖励。
+
+`prepare_opsd.py` 为全部 1,000 个训练任务提取原始需求、规格标注与目标商品信息，
+不提供 ASIN、persona 或奖励校验结果。仅匹配明确规格，不补选最低价选项；
+没有规格无需构造变体，未知价格留空，不排除任务。标注不能覆盖用户原话，
+教师只能操作当前页面可见目标。学生、验证和评测均看不到参考。
+
+actor、teacher 各用一张 GPU；启动前停止评测服务，确保 `/dev/shm` 空间充足。
+训练直接使用原始 parquet，preflight 检查参考覆盖、评测集零重叠与必要字段。
+配置见 [`configs/opsd.yaml`](../configs/opsd.yaml)：
+
+```bash
+bash scripts/opsd.sh -- \
+  data.train_batch_size=8 trainer.total_training_steps=200 trainer.save_freq=50
+```
+
+输出目录必须新建或为空，可用 `OPSD_OUTPUT_DIR` 指定。每 50 步验证和保存，
+checkpoint 只按验证集选择。导出与服务启动复用 `export_grpo.sh`、`serve_model.sh`，
+评测见[评估指南](evaluation.md)。当前版本 step 200 最新完整评测为 **138/200（69.0%）**；
+验证 reward 与严格成功率不是同一指标。
+

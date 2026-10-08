@@ -3,7 +3,7 @@
 This repository supports one workflow only:
 
 ```text
-Baseline → SFT → GRPO → Evaluation
+Baseline → SFT → GRPO → OPSD → Evaluation
 ```
 
 The runtime contract is ShopSimulator Environment v2.1, Reward v3, observation
@@ -15,3 +15,5 @@ requires a complete `gold_purchase` terminal result with `reward_valid=true`.
 
 Do not start training, merge models or run the 200-task evaluation unless the
 user explicitly requests execution.
+
+Keep the document concise and clean. The project must be elegant.

@@ -265,6 +265,45 @@ def validate_trace(config):
         )
 
 
+def validate_opsd(config):
+    """Check the native teacher pool only for the explicit OPSD recipe."""
+    opsd = config.get("shopping_opsd")
+    if opsd is None:
+        return
+    path = opsd.get("contracts_path")
+    if not path or str(path) == "???" or not Path(path).is_file():
+        raise SystemExit("OPSD requires shopping_opsd.contracts_path pointing to prepared contracts")
+    if not bool(config.distillation.enabled):
+        raise SystemExit("OPSD requires distillation.enabled=true")
+    if bool(config.distillation.distillation_loss.use_task_rewards):
+        raise SystemExit("shopping OPSD must not combine task rewards with distillation")
+    import pyarrow.parquet as parquet
+    from shopping_grpo.training.opsd.privilege import reference_rejection_reasons
+
+    held_out = {
+        json.loads(line)["task_id"]
+        for line in (Path(__file__).resolve().parents[1] / "data/evaluation/tasks.jsonl")
+        .read_text().splitlines()
+    }
+    task_ids = {
+        row["task_id"]
+        for row in parquet.read_table(config.data.train_files, columns=["extra_info"])
+        .column("extra_info").to_pylist()
+    }
+    if task_ids & held_out:
+        raise SystemExit("OPSD training tasks overlap the evaluation set")
+    contracts = json.loads(Path(path).read_text())["contracts"]
+    if not task_ids:
+        raise SystemExit("OPSD training set must not be empty")
+    if task_ids != {int(task_id) for task_id in contracts}:
+        raise SystemExit("OPSD contracts and training task sets must match exactly")
+    for task_id, contract in contracts.items():
+        reasons = reference_rejection_reasons(contract)
+        if reasons:
+            raise SystemExit(f"OPSD task {task_id} has an unusable reference: {'; '.join(reasons)}")
+    print("shopping OPSD preflight passed: " + json.dumps({"contracts": str(Path(path).resolve())}))
+
+
 def validate_swanlab_tracking(config):
     """Validate SwanLab only when the user explicitly enables it."""
     logger_backends = list(config.trainer.get("logger", []))
@@ -409,6 +448,7 @@ def main():
         raise SystemExit("missing GRPO parquet file(s): " + ", ".join(missing))
     validate_training_memory_budget(config)
     validate_trace(config)
+    validate_opsd(config)
 
     if sys.version_info[:2] != (3, 12):
         raise SystemExit(f"incompatible Python: expected 3.12, got {sys.version.split()[0]}")
